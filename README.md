@@ -79,6 +79,15 @@ npm run dev
 docker compose up --build -d
 ```
 
+Docker 构建默认使用国内的 npm 镜像，以及清华 TUNA 的 Debian 和 PyPI 镜像。需要切换镜像时，可在 `.env` 中覆盖：
+
+```dotenv
+DOCKER_NPM_REGISTRY=https://registry.npmmirror.com
+DOCKER_DEBIAN_MIRROR=https://mirrors.tuna.tsinghua.edu.cn/debian
+DOCKER_DEBIAN_SECURITY_MIRROR=https://mirrors.tuna.tsinghua.edu.cn/debian-security
+DOCKER_PIP_INDEX_URL=https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
+```
+
 访问 `http://localhost:8002/video-show/`。SQLite 保存在宿主机 `./data`，备份该目录即可保存媒体元数据；原始媒体仍位于 COS。
 
 如需修改映射端口，可在 `.env` 增加：

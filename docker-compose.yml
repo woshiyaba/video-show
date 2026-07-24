@@ -1,6 +1,12 @@
 services:
   video-show:
-    build: .
+    build:
+      context: .
+      args:
+        NPM_REGISTRY: ${DOCKER_NPM_REGISTRY:-https://registry.npmmirror.com}
+        DEBIAN_MIRROR: ${DOCKER_DEBIAN_MIRROR:-https://mirrors.tuna.tsinghua.edu.cn/debian}
+        DEBIAN_SECURITY_MIRROR: ${DOCKER_DEBIAN_SECURITY_MIRROR:-https://mirrors.tuna.tsinghua.edu.cn/debian-security}
+        PIP_INDEX_URL: ${DOCKER_PIP_INDEX_URL:-https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple}
     container_name: video-show
     restart: unless-stopped
     env_file:
