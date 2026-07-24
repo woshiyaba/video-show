@@ -17,7 +17,13 @@ import {
   useRef,
   useState,
 } from "react";
-import { apiFetch, deleteMedia, listMedia, renameMedia } from "../api";
+import {
+  apiFetch,
+  clearMediaDetailCache,
+  deleteMedia,
+  listMedia,
+  renameMedia,
+} from "../api";
 import {
   formatBytes,
   formatDate,
@@ -144,6 +150,7 @@ function UploadQueue({ onUploaded }: { onUploaded: () => void }) {
           onProgress: (progress) => patchItem(item.id, { progress }),
         });
         patchItem(item.id, { status: "success", progress: 100 });
+        clearMediaDetailCache();
         onUploaded();
       } catch (reason) {
         if (reason instanceof UploadCancelledError) {

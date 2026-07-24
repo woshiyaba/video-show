@@ -644,6 +644,7 @@ img {
 }
 
 .player-frame {
+  position: relative;
   aspect-ratio: 16 / 9;
   overflow: hidden;
   border-radius: 20px;
@@ -657,6 +658,68 @@ img {
   display: block;
   object-fit: contain;
   background: #101216;
+}
+
+.buffer-overlay {
+  position: absolute;
+  z-index: 2;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 22px;
+  color: #fff;
+  background: rgba(10, 12, 16, 0.58);
+  backdrop-filter: blur(3px);
+}
+
+.buffer-card {
+  display: flex;
+  width: min(100%, 310px);
+  flex-direction: column;
+  align-items: center;
+  gap: 9px;
+  padding: 20px 22px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 15px;
+  background: rgba(15, 18, 23, 0.84);
+  text-align: center;
+  box-shadow: 0 16px 45px rgba(0, 0, 0, 0.28);
+}
+
+.buffer-card strong {
+  font-size: 14px;
+}
+
+.buffer-card span {
+  color: rgba(255, 255, 255, 0.72);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.buffer-spinner {
+  animation: spin 800ms linear infinite;
+}
+
+.buffer-action {
+  margin-top: 4px;
+  padding: 8px 14px;
+  border: 1px solid rgba(255, 255, 255, 0.28);
+  border-radius: 9px;
+  color: #fff;
+  background: rgba(255, 255, 255, 0.12);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.buffer-action:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.2);
+}
+
+.buffer-action:disabled {
+  cursor: default;
+  opacity: 0.6;
 }
 
 .watch-info {
@@ -703,6 +766,17 @@ img {
 .related-list {
   display: grid;
   gap: 23px;
+}
+
+.related-status {
+  margin: 0;
+  padding: 15px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  color: var(--muted);
+  background: rgba(255, 255, 255, 0.72);
+  font-size: 12px;
+  line-height: 1.55;
 }
 
 .related-list .video-card-title {
