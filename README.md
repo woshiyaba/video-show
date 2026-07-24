@@ -35,7 +35,7 @@ COS_BUCKET=example-1250000000
 
 | 配置项 | 值 |
 | --- | --- |
-| 来源 Origin | `http://localhost:5173`、`http://localhost:8000` 或正式站点域名 |
+| 来源 Origin | `https://wikiroco.com`（开发时另加 `http://localhost:5173`） |
 | Allowed Methods | `GET`, `HEAD`, `PUT` |
 | Allowed Headers | `*` |
 | Expose Headers | `ETag`, `Accept-Ranges`, `Content-Range`, `Content-Length` |
@@ -60,15 +60,16 @@ cd ..
 分别启动两个终端：
 
 ```powershell
-# 终端一：http://localhost:8000
-uv run uvicorn app.main:app --reload
+# 终端一：http://localhost:8002/video-show/
+uv run uvicorn app.main:app --host 0.0.0.0 --port 8002 --reload
 
-# 终端二：http://localhost:5173
+# 终端二：http://localhost:5173/video-show/
 cd frontend
 npm run dev
 ```
 
-开发服务器会把 `/api` 代理到 FastAPI。API 文档位于 `http://localhost:8000/docs`。
+开发服务器会把 `/video-show/api` 代理到 FastAPI。API 文档位于
+`http://localhost:8002/video-show/docs`。
 
 ## 3. Docker 部署
 
@@ -78,18 +79,56 @@ npm run dev
 docker compose up --build -d
 ```
 
-访问 `http://localhost:8000`。SQLite 保存在宿主机 `./data`，备份该目录即可保存媒体元数据；原始媒体仍位于 COS。
+访问 `http://localhost:8002/video-show/`。SQLite 保存在宿主机 `./data`，备份该目录即可保存媒体元数据；原始媒体仍位于 COS。
 
 如需修改映射端口，可在 `.env` 增加：
 
 ```dotenv
-APP_PORT=8080
-CORS_ORIGINS=https://media.example.com
+APP_PORT=8002
+CORS_ORIGINS=https://wikiroco.com
 ```
 
 生产环境反向代理应允许前端访问 COS 域名，并使用 HTTPS。若启用 Content Security Policy，需要把相应 COS 域名加入 `media-src` 和 `img-src`。
 
-## 4. 验证按需播放
+## 4. 接入现有 wikiroco.com Nginx
+
+网站和所有接口统一使用 `/video-show` 前缀：
+
+- 前台：`https://wikiroco.com/video-show/`
+- 管理后台：`https://wikiroco.com/video-show/admin`
+- API：`https://wikiroco.com/video-show/api/...`
+- API 文档：`https://wikiroco.com/video-show/docs`
+
+因为 80 和 443 已由现有服务占用，不要再创建新的 `listen 80` 或
+`listen 443`。把项目中的
+[`nginx/wikiroco.com-video-show.location.conf`](nginx/wikiroco.com-video-show.location.conf)
+放到服务器，例如：
+
+```text
+/etc/nginx/snippets/wikiroco.com-video-show.location.conf
+```
+
+然后在现有的 `server_name wikiroco.com;` HTTPS `server` 块内部加入：
+
+```nginx
+include /etc/nginx/snippets/wikiroco.com-video-show.location.conf;
+```
+
+片段内的上游地址为 `127.0.0.1:8002`。`proxy_pass` 后面特意没有 `/`，
+这样 Nginx 会把完整的 `/video-show/...` 路径交给 FastAPI。修改完成后：
+
+```bash
+sudo nginx -t
+sudo systemctl reload nginx
+```
+
+如果现有的 80 端口虚拟主机已经统一跳转 HTTPS，只需在 443 的
+`wikiroco.com` 虚拟主机中 include；如果 HTTP 也直接提供页面，则在两个
+现有 `server` 块中都 include。同一 IP:端口无法由两个独立进程同时监听，
+所以若占用 80/443 的不是 Nginx，需要在当前占用者中配置反向代理，或改用
+带端口的访问地址。
+
+## 5. 验证按需播放
 
 1. 上传浏览器兼容的 MP4（推荐 H.264 视频和 AAC 音频）。
 2. 打开视频详情页和浏览器开发者工具的 Network 面板。
@@ -98,11 +137,11 @@ CORS_ORIGINS=https://media.example.com
 
 未进行服务端转码意味着 MOV、MKV 或采用浏览器不支持编码的 MP4 不会被接受。若未来需要多清晰度、自适应码率或更广泛的编码兼容性，可再增加 FFmpeg/HLS 处理流水线。
 
-## 5. 测试与构建
+## 6. 测试与构建
 
 ```powershell
 # 后端测试
-uv run pytest
+uv run --extra dev pytest
 
 # 前端测试、类型检查和生产构建
 cd frontend
@@ -111,4 +150,6 @@ npm run type-check
 npm run build
 ```
 
-后端自动测试使用模拟 COS，不会读写真实存储桶。`GET /api/health?deep=true` 可在部署后主动检查 COS 连通性。
+后端自动测试使用模拟 COS，不会读写真实存储桶。
+`GET /video-show/api/health?deep=true` 可在部署后主动检查 COS 连通性及
+CORS 配置。

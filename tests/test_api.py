@@ -93,7 +93,7 @@ def api_client(
 
 def initiate_video(client: TestClient) -> dict:
     response = client.post(
-        "/api/uploads/initiate",
+        "/video-show/api/uploads/initiate",
         json={
             "title": "  夏日海边  ",
             "media_type": "video",
@@ -120,21 +120,21 @@ def test_full_upload_list_rename_and_delete(api_client) -> None:
     }
 
     signed = client.post(
-        f"/api/uploads/{session_id}/parts/sign",
+        f"/video-show/api/uploads/{session_id}/parts/sign",
         json={"part_numbers": [1]},
     )
     assert signed.status_code == 200
     assert signed.json()["parts"][0]["part_number"] == 1
 
     completed = client.post(
-        f"/api/uploads/{session_id}/complete",
+        f"/video-show/api/uploads/{session_id}/complete",
         json={"parts": [{"part_number": 1, "etag": '"etag-1"'}]},
     )
     assert completed.status_code == 200, completed.text
     assert completed.json()["media"]["title"] == "夏日海边"
     assert len(fake_cos.completed) == 1
 
-    listing = client.get("/api/media?type=video&q=海边")
+    listing = client.get("/video-show/api/media?type=video&q=海边")
     assert listing.status_code == 200
     assert listing.headers["cache-control"] == "private, no-store"
     assert listing.json()["total"] == 1
@@ -142,18 +142,18 @@ def test_full_upload_list_rename_and_delete(api_client) -> None:
         "https://cos.example/"
     )
 
-    detail = client.get(f"/api/media/{session_id}")
+    detail = client.get(f"/video-show/api/media/{session_id}")
     assert detail.status_code == 200
     assert detail.json()["content_url"].endswith("?signed=1")
 
     renamed = client.patch(
-        f"/api/media/{session_id}",
+        f"/video-show/api/media/{session_id}",
         json={"title": "新的名字"},
     )
     assert renamed.status_code == 200
     assert renamed.json()["title"] == "新的名字"
 
-    deleted = client.delete(f"/api/media/{session_id}")
+    deleted = client.delete(f"/video-show/api/media/{session_id}")
     assert deleted.status_code == 204
     assert len(fake_cos.deleted[-1]) == 2
     with testing_session() as db:
@@ -164,7 +164,7 @@ def test_complete_rejects_missing_parts(api_client) -> None:
     client, _, fake_cos = api_client
     initiated = initiate_video(client)
     response = client.post(
-        f"/api/uploads/{initiated['session_id']}/complete",
+        f"/video-show/api/uploads/{initiated['session_id']}/complete",
         json={"parts": [{"part_number": 2, "etag": '"wrong"'}]},
     )
     assert response.status_code == 422
@@ -176,7 +176,7 @@ def test_complete_requires_uploaded_thumbnail(api_client) -> None:
     initiated = initiate_video(client)
     fake_cos.thumbnail_exists = False
     response = client.post(
-        f"/api/uploads/{initiated['session_id']}/complete",
+        f"/video-show/api/uploads/{initiated['session_id']}/complete",
         json={"parts": [{"part_number": 1, "etag": '"etag"'}]},
     )
     assert response.status_code == 422
@@ -188,13 +188,13 @@ def test_delete_failure_preserves_database_record(api_client) -> None:
     initiated = initiate_video(client)
     media_id = initiated["session_id"]
     complete = client.post(
-        f"/api/uploads/{media_id}/complete",
+        f"/video-show/api/uploads/{media_id}/complete",
         json={"parts": [{"part_number": 1, "etag": '"etag"'}]},
     )
     assert complete.status_code == 200
 
     fake_cos.fail_delete = True
-    response = client.delete(f"/api/media/{media_id}")
+    response = client.delete(f"/video-show/api/media/{media_id}")
     assert response.status_code == 502
     with testing_session() as db:
         assert db.get(Media, media_id) is not None
@@ -203,7 +203,7 @@ def test_delete_failure_preserves_database_record(api_client) -> None:
 def test_validation_and_abort(api_client) -> None:
     client, _, fake_cos = api_client
     invalid = client.post(
-        "/api/uploads/initiate",
+        "/video-show/api/uploads/initiate",
         json={
             "title": "压缩包",
             "media_type": "photo",
@@ -217,6 +217,13 @@ def test_validation_and_abort(api_client) -> None:
     assert invalid.status_code == 422
 
     initiated = initiate_video(client)
-    response = client.delete(f"/api/uploads/{initiated['session_id']}")
+    response = client.delete(
+        f"/video-show/api/uploads/{initiated['session_id']}"
+    )
     assert response.status_code == 204
     assert fake_cos.aborted
+
+
+def test_old_unprefixed_api_is_not_exposed(api_client) -> None:
+    client, _, _ = api_client
+    assert client.get("/api/media").status_code == 404

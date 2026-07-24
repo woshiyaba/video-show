@@ -5,7 +5,9 @@ import type {
   MediaType,
 } from "./types";
 
-const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "";
+const API_ORIGIN = (import.meta.env.VITE_API_ORIGIN ?? "").replace(/\/$/, "");
+const APP_BASE = import.meta.env.BASE_URL.replace(/\/$/, "");
+const API_BASE = `${API_ORIGIN}${APP_BASE}`;
 
 export class ApiError extends Error {
   status: number;

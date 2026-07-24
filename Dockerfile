@@ -25,8 +25,8 @@ RUN apt-get update \
 COPY --from=frontend-builder /build/frontend/dist ./frontend/dist
 RUN mkdir -p /app/data
 
-EXPOSE 8000
+EXPOSE 8002
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3)"
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8002/video-show/api/health', timeout=3)"
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8002"]

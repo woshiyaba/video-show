@@ -5,11 +5,11 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.api import _cleanup_expired_uploads, router
-from app.config import get_settings
+from app.config import APP_PREFIX, get_settings
 from app.cos_service import get_cos_service
 from app.database import Base, SessionLocal, engine
 
@@ -33,6 +33,9 @@ app = FastAPI(
     title=settings.app_name,
     version="0.1.0",
     lifespan=lifespan,
+    docs_url=f"{APP_PREFIX}/docs",
+    redoc_url=f"{APP_PREFIX}/redoc",
+    openapi_url=f"{APP_PREFIX}/openapi.json",
 )
 app.add_middleware(
     CORSMiddleware,
@@ -46,10 +49,24 @@ app.include_router(router)
 frontend_dir = settings.frontend_dir.resolve()
 assets_dir = frontend_dir / "assets"
 if assets_dir.is_dir():
-    app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
+    app.mount(
+        f"{APP_PREFIX}/assets",
+        StaticFiles(directory=assets_dir),
+        name="assets",
+    )
 
 
-@app.get("/{full_path:path}", include_in_schema=False)
+@app.get("/", include_in_schema=False)
+def redirect_root():
+    return RedirectResponse(url=f"{APP_PREFIX}/", status_code=308)
+
+
+@app.get(APP_PREFIX, include_in_schema=False)
+def redirect_prefixed_root():
+    return RedirectResponse(url=f"{APP_PREFIX}/", status_code=308)
+
+
+@app.get(f"{APP_PREFIX}/{{full_path:path}}", include_in_schema=False)
 def serve_frontend(full_path: str):
     if full_path.startswith("api/"):
         raise HTTPException(status_code=404, detail="接口不存在")

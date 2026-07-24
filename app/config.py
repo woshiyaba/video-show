@@ -6,6 +6,8 @@ from pathlib import Path
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+APP_PREFIX = "/video-show"
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -24,7 +26,9 @@ class Settings(BaseSettings):
     cos_region: str = ""
     cos_bucket: str = ""
 
-    cors_origins: str = "http://localhost:5173,http://localhost:8000"
+    cors_origins: str = (
+        "http://localhost:5173,http://localhost:8002,https://wikiroco.com"
+    )
     max_upload_size_gb: int = Field(default=20, ge=1, le=500)
     upload_part_size_mb: int = Field(default=16, ge=1, le=5120)
     upload_url_expires_seconds: int = Field(default=3600, ge=300, le=86400)

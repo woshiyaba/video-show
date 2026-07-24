@@ -8,8 +8,8 @@ services:
     environment:
       DATABASE_URL: sqlite:////app/data/video_show.db
       FRONTEND_DIR: /app/frontend/dist
-      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:8000}
+      CORS_ORIGINS: ${CORS_ORIGINS:-https://wikiroco.com,http://localhost:8002}
     ports:
-      - "${APP_PORT:-8000}:8000"
+      - "${APP_PORT:-8002}:8002"
     volumes:
       - ./data:/app/data

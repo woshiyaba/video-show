@@ -11,7 +11,7 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from app.config import Settings, get_settings
+from app.config import APP_PREFIX, Settings, get_settings
 from app.cos_service import CosNotConfiguredError, CosService, get_cos_service
 from app.database import get_db
 from app.models import Media, UploadSession, utc_now
@@ -33,7 +33,7 @@ from app.schemas import (
 )
 
 logger = logging.getLogger(__name__)
-router = APIRouter(prefix="/api")
+router = APIRouter(prefix=f"{APP_PREFIX}/api")
 
 MIME_EXTENSIONS = {
     "video/mp4": ".mp4",
