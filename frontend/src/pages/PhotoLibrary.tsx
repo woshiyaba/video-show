@@ -68,8 +68,10 @@ function Lightbox({ items, index, onChange, onClose }: LightboxProps) {
       <div className="lightbox-content">
         {error ? (
           <div className="lightbox-error">{error}</div>
-        ) : detail ? (
+        ) : detail?.content_url ? (
           <img src={detail.content_url} alt={detail.title} />
+        ) : detail ? (
+          <div className="lightbox-error">原图地址尚未准备好</div>
         ) : (
           <PageLoader label="正在打开原图…" />
         )}

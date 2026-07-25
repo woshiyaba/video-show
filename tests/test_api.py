@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 import app.api as api_module
 from app.api import router
+from app.config import Settings, get_settings
 from app.database import Base, get_db
 from app.models import Media
 
@@ -22,6 +23,8 @@ class FakeCosService:
         self.deleted: list[list[str]] = []
         self.fail_delete = False
         self.thumbnail_exists = True
+        self.objects: dict[str, bytes] = {}
+        self.settings = Settings(_env_file=None)
 
     def create_multipart_upload(self, key: str, content_type: str) -> str:
         assert key.startswith("media/")
@@ -40,23 +43,50 @@ class FakeCosService:
         self, key: str, upload_id: str, parts: list[dict]
     ) -> None:
         self.completed.append((key, upload_id, parts))
+        self.objects[key] = b"source-video"
 
     def abort_multipart_upload(self, key: str, upload_id: str) -> None:
         self.aborted.append((key, upload_id))
 
     def object_exists(self, key: str) -> bool:
-        return self.thumbnail_exists
+        if key.startswith("thumbnails/"):
+            return self.thumbnail_exists
+        return key in self.objects
 
     def delete_object(self, key: str) -> None:
         self.deleted.append([key])
+        self.objects.pop(key, None)
 
     def delete_objects(self, keys: list[str]) -> None:
         if self.fail_delete:
             raise RuntimeError("COS unavailable")
         self.deleted.append(keys)
+        for key in keys:
+            self.objects.pop(key, None)
 
-    def sign_download(self, key: str) -> str:
+    def sign_download(
+        self,
+        key: str,
+        params: dict[str, str] | None = None,
+    ) -> str:
         return f"https://cos.example/{key}?signed=1"
+
+    def read_object(self, key: str) -> bytes:
+        return self.objects[key]
+
+    def list_objects(self, prefix: str) -> list[tuple[str, int]]:
+        return [
+            (key, len(body))
+            for key, body in self.objects.items()
+            if key.startswith(prefix)
+        ]
+
+    def delete_prefix(self, prefix: str) -> None:
+        keys = [
+            key for key in self.objects
+            if key.startswith(prefix)
+        ]
+        self.delete_objects(keys)
 
     def check_bucket(self) -> None:
         return None
@@ -86,6 +116,7 @@ def api_client(
     application = FastAPI()
     application.include_router(router)
     application.dependency_overrides[get_db] = override_db
+    application.dependency_overrides[get_settings] = lambda: fake_cos.settings
     with TestClient(application) as client:
         yield client, testing_session, fake_cos
     engine.dispose()
@@ -227,3 +258,155 @@ def test_validation_and_abort(api_client) -> None:
 def test_old_unprefixed_api_is_not_exposed(api_client) -> None:
     client, _, _ = api_client
     assert client.get("/api/media").status_code == 404
+
+
+def test_incomplete_transcoding_config_rejects_video_upload(
+    api_client,
+) -> None:
+    client, _, fake_cos = api_client
+    fake_cos.settings.video_transcoding_enabled = True
+
+    response = client.post(
+        "/video-show/api/uploads/initiate",
+        json={
+            "title": "待压缩视频",
+            "media_type": "video",
+            "original_filename": "clip.mp4",
+            "mime_type": "video/mp4",
+            "size_bytes": 1024,
+            "duration_seconds": 20,
+            "width": 1920,
+            "height": 1080,
+        },
+    )
+
+    assert response.status_code == 503
+    assert "工作流配置不完整" in response.json()["detail"]
+
+
+def test_transcode_callback_promotes_private_hls_and_deletes_source(
+    api_client,
+) -> None:
+    client, _, fake_cos = api_client
+    fake_cos.settings.video_transcoding_enabled = True
+    fake_cos.settings.cos_workflow_id = "workflow-123"
+    fake_cos.settings.transcode_callback_token = "t" * 40
+    fake_cos.settings.cos_bucket = "media-bucket-1250000000"
+
+    initiated = initiate_video(client)
+    media_id = initiated["session_id"]
+    completed = client.post(
+        f"/video-show/api/uploads/{media_id}/complete",
+        json={"parts": [{"part_number": 1, "etag": '"etag"'}]},
+    )
+    assert completed.status_code == 200
+    assert completed.json()["media"]["processing_status"] == "processing"
+    assert completed.json()["media"]["playback_type"] == "unavailable"
+
+    source_key = fake_cos.completed[0][0]
+    prefix = f"media/hls/{media_id}/"
+    fake_cos.objects.update(
+        {
+            f"{prefix}master.m3u8": (
+                b"#EXTM3U\n720/index.m3u8\n1080/index.m3u8\n"
+            ),
+            f"{prefix}720/index.m3u8": b"#EXTM3U\nsegment-0.ts\n",
+            f"{prefix}720/segment-0.ts": b"720-segment",
+            f"{prefix}1080/index.m3u8": b"#EXTM3U\nsegment-0.ts\n",
+            f"{prefix}1080/segment-0.ts": b"1080-segment",
+        }
+    )
+    callback = client.post(
+        f"/video-show/api/transcode/callback/{'t' * 40}",
+        json={
+            "EventName": "WorkflowFinish",
+            "WorkflowExecution": {
+                "WorkflowId": "workflow-123",
+                "BucketId": "media-bucket-1250000000",
+                "Object": source_key,
+                "State": "Success",
+            },
+        },
+    )
+    assert callback.status_code == 200, callback.text
+    assert source_key not in fake_cos.objects
+
+    detail = client.get(f"/video-show/api/media/{media_id}")
+    assert detail.status_code == 200
+    assert detail.json()["processing_status"] == "ready"
+    assert detail.json()["playback_type"] == "hls"
+    assert detail.json()["content_url"] == (
+        f"/video-show/api/media/{media_id}/stream/master.m3u8"
+    )
+    assert detail.json()["playback_size_bytes"] > 0
+
+    playlist = client.get(
+        f"/video-show/api/media/{media_id}/stream/master.m3u8"
+    )
+    assert playlist.status_code == 200
+    assert playlist.headers["content-type"].startswith(
+        "application/vnd.apple.mpegurl"
+    )
+    segment = client.get(
+        f"/video-show/api/media/{media_id}/stream/720/segment-0.ts",
+        follow_redirects=False,
+    )
+    assert segment.status_code == 307
+    assert segment.headers["location"].endswith("?signed=1")
+    traversal = client.get(
+        f"/video-show/api/media/{media_id}/stream/%2E%2E/secret.ts",
+        follow_redirects=False,
+    )
+    assert traversal.status_code == 404
+
+    deleted = client.delete(f"/video-show/api/media/{media_id}")
+    assert deleted.status_code == 204
+    assert not any(key.startswith(prefix) for key in fake_cos.objects)
+
+
+def test_failed_transcode_keeps_source_and_rejects_bad_callback(
+    api_client,
+) -> None:
+    client, _, fake_cos = api_client
+    fake_cos.settings.video_transcoding_enabled = True
+    fake_cos.settings.cos_workflow_id = "workflow-123"
+    fake_cos.settings.transcode_callback_token = "s" * 40
+    fake_cos.settings.cos_bucket = "media-bucket-1250000000"
+
+    initiated = initiate_video(client)
+    media_id = initiated["session_id"]
+    client.post(
+        f"/video-show/api/uploads/{media_id}/complete",
+        json={"parts": [{"part_number": 1, "etag": '"etag"'}]},
+    )
+    source_key = fake_cos.completed[0][0]
+    payload = {
+        "EventName": "WorkflowFinish",
+        "WorkflowExecution": {
+            "WorkflowId": "workflow-123",
+            "BucketId": "media-bucket-1250000000",
+            "Object": source_key,
+            "State": "Failed",
+            "Tasks": [
+                {
+                    "State": "Failed",
+                    "Message": "unsupported codec",
+                }
+            ],
+        },
+    }
+    assert client.post(
+        "/video-show/api/transcode/callback/wrong-token",
+        json=payload,
+    ).status_code == 404
+    callback = client.post(
+        f"/video-show/api/transcode/callback/{'s' * 40}",
+        json=payload,
+    )
+    assert callback.status_code == 200
+    assert source_key in fake_cos.objects
+
+    detail = client.get(f"/video-show/api/media/{media_id}").json()
+    assert detail["processing_status"] == "failed"
+    assert detail["content_url"] is None
+    assert detail["processing_error"] == "unsupported codec"

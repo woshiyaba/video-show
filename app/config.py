@@ -34,12 +34,17 @@ class Settings(BaseSettings):
     upload_url_expires_seconds: int = Field(default=3600, ge=300, le=86400)
     media_url_expires_seconds: int = Field(default=21600, ge=300, le=86400)
     upload_session_hours: int = Field(default=24, ge=1, le=168)
+    video_transcoding_enabled: bool = False
+    cos_workflow_id: str = ""
+    transcode_callback_token: str = ""
 
     @field_validator(
         "cos_secret_id",
         "cos_secret_key",
         "cos_region",
         "cos_bucket",
+        "cos_workflow_id",
+        "transcode_callback_token",
         mode="before",
     )
     @classmethod
@@ -62,6 +67,14 @@ class Settings(BaseSettings):
     def cos_is_configured(self) -> bool:
         return all(
             (self.cos_secret_id, self.cos_secret_key, self.cos_region, self.cos_bucket)
+        )
+
+    @property
+    def video_transcoding_is_configured(self) -> bool:
+        return bool(
+            self.video_transcoding_enabled
+            and self.cos_workflow_id
+            and len(self.transcode_callback_token) >= 32
         )
 
 

@@ -1,4 +1,9 @@
-import { Image as ImageIcon, Play } from "lucide-react";
+import {
+  AlertTriangle,
+  Image as ImageIcon,
+  LoaderCircle,
+  Play,
+} from "lucide-react";
 import { useCallback, useEffect, useRef } from "react";
 import { Link } from "react-router-dom";
 import { prefetchMedia } from "../api";
@@ -74,18 +79,36 @@ export function MediaCard({ media, photo = false, onPhotoClick }: Props) {
             {formatDuration(media.duration_seconds)}
           </span>
         )}
-        <span className="play-overlay">
-          <Play size={24} fill="currentColor" />
-        </span>
+        {media.processing_status === "processing" && (
+          <span className="processing-badge">
+            <LoaderCircle size={13} />
+            云端压缩中
+          </span>
+        )}
+        {media.processing_status === "failed" && (
+          <span className="processing-badge failed">
+            <AlertTriangle size={13} />
+            压缩失败
+          </span>
+        )}
+        {media.processing_status === "ready" && (
+          <span className="play-overlay">
+            <Play size={24} fill="currentColor" />
+          </span>
+        )}
       </span>
       <span className="video-card-body">
         <span className="video-card-title">{media.title}</span>
         <span className="video-card-meta">
           {formatDate(media.created_at)}
           <span aria-hidden="true">·</span>
-          {media.width && media.height
-            ? `${media.width} × ${media.height}`
-            : "视频"}
+          {media.processing_status === "processing"
+            ? "正在准备播放版"
+            : media.processing_status === "failed"
+              ? "原片已安全保留"
+              : media.width && media.height
+                ? `${media.width} × ${media.height}`
+                : "视频"}
         </span>
       </span>
     </Link>

@@ -13,6 +13,53 @@ import { WatchPage } from "../pages/WatchPage";
 import type { MediaDetailData } from "../types";
 import { deferred, mediaCard, mediaDetail, mediaList } from "./fixtures";
 
+const hlsMock = vi.hoisted(() => ({
+  supported: false,
+  instances: [] as Array<{
+    source: string | null;
+    destroyed: boolean;
+  }>,
+}));
+
+vi.mock("hls.js", () => {
+  class MockHls {
+    static Events = {
+      MEDIA_ATTACHED: "media-attached",
+      ERROR: "error",
+    };
+
+    static isSupported() {
+      return hlsMock.supported;
+    }
+
+    source: string | null = null;
+    destroyed = false;
+    callbacks = new Map<string, (...args: unknown[]) => void>();
+
+    constructor() {
+      hlsMock.instances.push(this);
+    }
+
+    on(event: string, callback: (...args: unknown[]) => void) {
+      this.callbacks.set(event, callback);
+    }
+
+    attachMedia() {
+      this.callbacks.get(MockHls.Events.MEDIA_ATTACHED)?.();
+    }
+
+    loadSource(source: string) {
+      this.source = source;
+    }
+
+    destroy() {
+      this.destroyed = true;
+    }
+  }
+
+  return { default: MockHls };
+});
+
 vi.mock("../api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../api")>();
   return {
@@ -67,6 +114,8 @@ describe("WatchPage progressive playback", () => {
     getMediaMock.mockReset();
     listMediaMock.mockReset();
     listMediaMock.mockResolvedValue(mediaList([]));
+    hlsMock.supported = false;
+    hlsMock.instances.length = 0;
     vi.mocked(api.prefetchMedia).mockClear();
     Object.defineProperty(navigator, "connection", {
       configurable: true,
@@ -135,6 +184,56 @@ describe("WatchPage progressive playback", () => {
     expect(
       screen.queryByRole("heading", { name: "无法打开这段视频" }),
     ).not.toBeInTheDocument();
+  });
+
+  it("shows cloud processing state without creating a player", async () => {
+    getMediaMock.mockResolvedValue(
+      mediaDetail("clip", {
+        processing_status: "processing",
+        playback_type: "unavailable",
+        content_url: null,
+      }),
+    );
+
+    const { container } = renderWatchPage();
+
+    expect(
+      await screen.findByRole("heading", {
+        name: "视频正在云端压缩",
+      }),
+    ).toBeInTheDocument();
+    expect(container.querySelector("video")).not.toBeInTheDocument();
+  });
+
+  it("uses hls.js ABR without the direct-video pause loop", async () => {
+    hlsMock.supported = true;
+    vi.spyOn(
+      HTMLMediaElement.prototype,
+      "canPlayType",
+    ).mockReturnValue("");
+    getMediaMock.mockResolvedValue(
+      mediaDetail("clip", {
+        playback_type: "hls",
+        content_url:
+          "/video-show/api/media/clip/stream/master.m3u8",
+        playback_size_bytes: 12 * 1024 * 1024,
+      }),
+    );
+
+    const { container } = renderWatchPage();
+    await screen.findByRole("heading", { name: "视频 clip" });
+    await waitFor(() => expect(hlsMock.instances).toHaveLength(1));
+    expect(hlsMock.instances[0].source).toBe(
+      "/video-show/api/media/clip/stream/master.m3u8",
+    );
+
+    const video = getVideo(container);
+    fireEvent.playing(video);
+    fireEvent.waiting(video);
+    expect(pauseSpy).not.toHaveBeenCalled();
+    expect(
+      await screen.findByText("网络有些慢，正在多缓冲一点…"),
+    ).toBeInTheDocument();
   });
 
   it.each([

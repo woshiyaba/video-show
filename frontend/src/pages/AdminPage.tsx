@@ -55,6 +55,7 @@ interface QueueItem {
   previewUrl?: string;
   metadata?: UploadMetadata;
   error?: string;
+  cloudProcessing?: boolean;
 }
 
 function UploadQueue({ onUploaded }: { onUploaded: () => void }) {
@@ -142,14 +143,18 @@ function UploadQueue({ onUploaded }: { onUploaded: () => void }) {
       controllers.current.set(item.id, controller);
       patchItem(item.id, { status: "uploading", progress: 0, error: undefined });
       try {
-        await uploadMedia({
+        const uploaded = await uploadMedia({
           file: item.file,
           title: item.title,
           metadata: item.metadata,
           controller,
           onProgress: (progress) => patchItem(item.id, { progress }),
         });
-        patchItem(item.id, { status: "success", progress: 100 });
+        patchItem(item.id, {
+          status: "success",
+          progress: 100,
+          cloudProcessing: uploaded.processing_status === "processing",
+        });
         clearMediaDetailCache();
         onUploaded();
       } catch (reason) {
@@ -277,7 +282,10 @@ function UploadQueue({ onUploaded }: { onUploaded: () => void }) {
                     {item.status === "preparing" && "正在生成封面"}
                     {item.status === "ready" && "等待上传"}
                     {item.status === "uploading" && `${item.progress}%`}
-                    {item.status === "success" && "上传完成"}
+                    {item.status === "success" &&
+                      (item.cloudProcessing
+                        ? "上传完成，云端压缩中"
+                        : "上传完成")}
                     {item.status === "error" && (item.error ?? "上传失败")}
                     {item.status === "cancelled" && "已取消"}
                   </span>
@@ -338,8 +346,8 @@ function MediaManager({ refreshKey }: { refreshKey: number }) {
   const [editingTitle, setEditingTitle] = useState("");
   const [busyId, setBusyId] = useState<string | null>(null);
 
-  const load = useCallback(() => {
-    setLoading(true);
+  const load = useCallback((silent = false) => {
+    if (!silent) setLoading(true);
     setError("");
     listMedia(undefined, "", 1, 100)
       .then((result) => setItems(result.items))
@@ -347,7 +355,17 @@ function MediaManager({ refreshKey }: { refreshKey: number }) {
       .finally(() => setLoading(false));
   }, []);
 
-  useEffect(load, [load, refreshKey]);
+  useEffect(() => {
+    load();
+  }, [load, refreshKey]);
+
+  useEffect(() => {
+    if (!items.some((item) => item.processing_status === "processing")) {
+      return;
+    }
+    const timer = setTimeout(() => load(true), 5_000);
+    return () => clearTimeout(timer);
+  }, [items, load]);
 
   const saveTitle = async (item: MediaCardData) => {
     const title = editingTitle.trim();
@@ -435,7 +453,17 @@ function MediaManager({ refreshKey }: { refreshKey: number }) {
                 )}
                 <span>
                   {item.media_type === "video" ? "视频" : "照片"} ·{" "}
-                  {formatBytes(item.size_bytes)} · {formatDate(item.created_at)}
+                  {formatBytes(
+                    item.playback_size_bytes ?? item.size_bytes,
+                  )}{" "}
+                  · {formatDate(item.created_at)}
+                  {item.processing_status === "processing" &&
+                    " · 正在云端压缩"}
+                  {item.processing_status === "failed" &&
+                    " · 压缩失败，原片已保留"}
+                  {item.playback_type === "hls" &&
+                    item.playback_size_bytes != null &&
+                    ` · 原片 ${formatBytes(item.size_bytes)}`}
                 </span>
               </div>
               <div className="manage-actions">
@@ -495,6 +523,8 @@ export function AdminPage() {
       cos_configured: boolean;
       cos: string;
       cos_cors: string;
+      video_transcoding_enabled: boolean;
+      video_transcoding: string;
     }>("/api/health?deep=true")
       .then((health) => {
         if (!health.cos_configured) {
@@ -508,6 +538,13 @@ export function AdminPage() {
         } else if (health.cos_cors === "incomplete") {
           setCorsWarning(
             "COS 的 CORS 规则不完整，请确认允许 GET、HEAD、PUT 并暴露 ETag。",
+          );
+        } else if (
+          health.video_transcoding_enabled &&
+          health.video_transcoding === "incomplete"
+        ) {
+          setCorsWarning(
+            "视频云压缩配置不完整，请检查工作流 ID 和回调令牌；修复前新视频上传会被拒绝。",
           );
         }
       })

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from sqlalchemy import DateTime, Float, Index, Integer, String, Text
+from sqlalchemy import Boolean, DateTime, Float, Index, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
@@ -30,6 +30,24 @@ class Media(Base):
     duration_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
     width: Mapped[int | None] = mapped_column(Integer, nullable=True)
     height: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    hls_master_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    processing_status: Mapped[str] = mapped_column(
+        String(16),
+        default="ready",
+        server_default="ready",
+        nullable=False,
+    )
+    processing_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    playback_size_bytes: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+    )
+    source_delete_pending: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default="0",
+        nullable=False,
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime, default=utc_now, nullable=False
     )
@@ -57,6 +75,24 @@ class UploadSession(Base):
     duration_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
     width: Mapped[int | None] = mapped_column(Integer, nullable=True)
     height: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    hls_master_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    processing_status: Mapped[str] = mapped_column(
+        String(16),
+        default="ready",
+        server_default="ready",
+        nullable=False,
+    )
+    processing_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    playback_size_bytes: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+    )
+    source_delete_pending: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default="0",
+        nullable=False,
+    )
     part_size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
     total_parts: Mapped[int] = mapped_column(Integer, nullable=False)
     status: Mapped[str] = mapped_column(String(16), default="pending", nullable=False)

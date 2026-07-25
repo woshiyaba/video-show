@@ -108,13 +108,48 @@ class CosService:
             failed = ", ".join(str(item.get("Key", "unknown")) for item in errors)
             raise RuntimeError(f"COS 删除部分对象失败：{failed}")
 
-    def sign_download(self, key: str) -> str:
+    def sign_download(
+        self,
+        key: str,
+        params: dict[str, str] | None = None,
+    ) -> str:
         return self.client.get_presigned_url(
             Method="GET",
             Bucket=self.bucket,
             Key=key,
             Expired=self.media_url_expires,
+            Params=params or {},
         )
+
+    def read_object(self, key: str) -> bytes:
+        response = self.client.get_object(Bucket=self.bucket, Key=key)
+        return response["Body"].get_raw_stream().read()
+
+    def list_objects(self, prefix: str) -> list[tuple[str, int]]:
+        marker = ""
+        objects: list[tuple[str, int]] = []
+        while True:
+            response = self.client.list_objects(
+                Bucket=self.bucket,
+                Prefix=prefix,
+                Marker=marker,
+                MaxKeys=1000,
+            )
+            for item in response.get("Contents", []):
+                objects.append(
+                    (str(item["Key"]), int(item.get("Size", 0)))
+                )
+            if str(response.get("IsTruncated", "false")).lower() != "true":
+                break
+            marker = str(response.get("NextMarker", ""))
+            if not marker:
+                break
+        return objects
+
+    def delete_prefix(self, prefix: str) -> None:
+        keys = [key for key, _ in self.list_objects(prefix)]
+        for offset in range(0, len(keys), 1000):
+            self.delete_objects(keys[offset : offset + 1000])
 
     def check_bucket(self) -> None:
         self.client.head_bucket(Bucket=self.bucket)

@@ -1,4 +1,6 @@
 export type MediaType = "video" | "photo";
+export type ProcessingStatus = "processing" | "ready" | "failed";
+export type PlaybackType = "direct" | "hls" | "unavailable";
 
 export interface MediaCardData {
   id: string;
@@ -11,12 +13,16 @@ export interface MediaCardData {
   duration_seconds: number | null;
   width: number | null;
   height: number | null;
+  processing_status: ProcessingStatus;
+  playback_type: PlaybackType;
+  processing_error: string | null;
+  playback_size_bytes: number | null;
   created_at: string;
   updated_at: string;
 }
 
 export interface MediaDetailData extends MediaCardData {
-  content_url: string;
+  content_url: string | null;
 }
 
 export interface MediaListData {

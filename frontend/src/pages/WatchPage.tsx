@@ -23,6 +23,7 @@ const TARGET_BUFFER_SECONDS = 6;
 const MIN_RESUME_BUFFER_SECONDS = 2;
 const MAX_BUFFER_HOLD_MS = 5_000;
 const RELATED_FALLBACK_MS = 6_000;
+const PROCESSING_POLL_MS = 5_000;
 
 type PlaybackPhase =
   | "idle"
@@ -99,6 +100,8 @@ export function WatchPage() {
   const [conserveData] = useState(prefersDataSaving);
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const playbackTypeRef = useRef(media?.playback_type ?? "direct");
+  playbackTypeRef.current = media?.playback_type ?? "direct";
   const activeIdRef = useRef(id);
   activeIdRef.current = id;
   const holdReasonRef = useRef<HoldReason | null>(null);
@@ -181,7 +184,13 @@ export function WatchPage() {
   const beginHold = useCallback(
     (reason: HoldReason, shouldResume: boolean) => {
       const video = videoRef.current;
-      if (!video || seekingRef.current) return false;
+      if (
+        !video ||
+        seekingRef.current ||
+        playbackTypeRef.current === "hls"
+      ) {
+        return false;
+      }
 
       const ahead = getBufferedAhead(video);
       setBufferedAhead(ahead);
@@ -241,13 +250,111 @@ export function WatchPage() {
   }, [clearHold, id]);
 
   useEffect(() => {
-    if (!media) return;
+    if (
+      !media ||
+      media.processing_status !== "ready" ||
+      !media.content_url
+    ) {
+      return;
+    }
     const video = videoRef.current;
-    if (video) video.load();
-  }, [media, playerRevision]);
+    if (!video) return;
+
+    setPlaybackError("");
+    setPlaybackPhase("idle");
+    if (media.playback_type === "direct") {
+      video.load();
+      return;
+    }
+
+    clearHold();
+    const source = media.content_url;
+    if (video.canPlayType("application/vnd.apple.mpegurl")) {
+      video.src = source;
+      video.load();
+      return () => {
+        video.removeAttribute("src");
+        video.load();
+      };
+    }
+    let cancelled = false;
+    let activeHls: { destroy: () => void } | null = null;
+    void import("hls.js")
+      .then(({ default: Hls }) => {
+        if (cancelled) return;
+        if (!Hls.isSupported()) {
+          setPlaybackError("当前浏览器不支持 HLS 自适应视频播放。");
+          setPlaybackPhase("error");
+          return;
+        }
+
+        const hls = new Hls({
+          startLevel: -1,
+          maxBufferLength: conserveData ? 12 : 30,
+          backBufferLength: 30,
+        });
+        activeHls = hls;
+        hls.on(Hls.Events.MEDIA_ATTACHED, () => {
+          hls.loadSource(source);
+        });
+        hls.on(Hls.Events.ERROR, (_event, data) => {
+          if (!data.fatal || cancelled) return;
+          setPlaybackError(
+            "自适应视频流加载中断，请重新加载后继续观看。",
+          );
+          setPlaybackPhase("error");
+        });
+        hls.attachMedia(video);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setPlaybackError("自适应播放器加载失败，请刷新页面重试。");
+        setPlaybackPhase("error");
+      });
+    return () => {
+      cancelled = true;
+      activeHls?.destroy();
+      video.removeAttribute("src");
+      video.load();
+    };
+  }, [
+    clearHold,
+    conserveData,
+    media,
+    playerRevision,
+  ]);
 
   useEffect(() => {
-    if (!media) return;
+    if (media?.processing_status !== "processing") return;
+
+    let cancelled = false;
+    let controller: AbortController | null = null;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const poll = () => {
+      controller = new AbortController();
+      getMedia(id, { fresh: true, signal: controller.signal })
+        .then((detail) => {
+          if (cancelled) return;
+          setMedia(detail);
+          if (detail.processing_status === "processing") {
+            timer = setTimeout(poll, PROCESSING_POLL_MS);
+          }
+        })
+        .catch((reason: unknown) => {
+          if (cancelled || isAbortError(reason)) return;
+          timer = setTimeout(poll, PROCESSING_POLL_MS);
+        });
+    };
+    timer = setTimeout(poll, PROCESSING_POLL_MS);
+    return () => {
+      cancelled = true;
+      controller?.abort();
+      if (timer !== null) clearTimeout(timer);
+    };
+  }, [id, media?.processing_status]);
+
+  useEffect(() => {
+    if (!media || media.processing_status !== "ready") return;
 
     const controller = new AbortController();
     let started = false;
@@ -447,6 +554,52 @@ export function WatchPage() {
     );
   }
   if (!media) return <PageLoader label="正在准备播放…" />;
+  if (media.processing_status === "processing") {
+    return (
+      <main className="page-shell narrow-message processing-message">
+        <LoaderCircle className="buffer-spinner" size={32} />
+        <span className="eyebrow">腾讯云数据万象</span>
+        <h1>视频正在云端压缩</h1>
+        <p>
+          “{media.title}”正在生成 1080p 和 720p 自适应播放版，
+          完成后此页面会自动开始准备播放。
+        </p>
+        <p className="processing-note" role="status" aria-live="polite">
+          可以暂时离开此页面，稍后再回来查看。
+        </p>
+        <Link to="/" className="primary-button">
+          返回视频库
+        </Link>
+      </main>
+    );
+  }
+  if (media.processing_status === "failed") {
+    return (
+      <main className="page-shell narrow-message processing-message failed">
+        <RotateCw size={32} />
+        <span className="eyebrow">原片已安全保留</span>
+        <h1>视频压缩失败</h1>
+        <p>
+          {media.processing_error ??
+            "腾讯云没有成功生成播放版，请在数据万象控制台查看任务详情。"}
+        </p>
+        <Link to="/" className="primary-button">
+          返回视频库
+        </Link>
+      </main>
+    );
+  }
+  if (!media.content_url) {
+    return (
+      <main className="page-shell narrow-message">
+        <h1>播放地址尚未准备好</h1>
+        <p>请稍后刷新页面重试。</p>
+        <Link to="/" className="primary-button">
+          返回视频库
+        </Link>
+      </main>
+    );
+  }
 
   const showBufferOverlay = playbackPhase === "preparing" ||
     playbackPhase === "rebuffering" ||
@@ -470,7 +623,11 @@ export function WatchPage() {
             <video
               key={`${media.content_url}-${playerRevision}`}
               ref={videoRef}
-              src={media.content_url}
+              src={
+                media.playback_type === "direct"
+                  ? media.content_url
+                  : undefined
+              }
               poster={media.thumbnail_url ?? undefined}
               controls
               playsInline
@@ -542,7 +699,9 @@ export function WatchPage() {
               </span>
               <span>
                 <HardDrive size={15} />
-                {formatBytes(media.size_bytes)}
+                {formatBytes(
+                  media.playback_size_bytes ?? media.size_bytes,
+                )}
               </span>
               {media.width && media.height && (
                 <span>
@@ -552,7 +711,9 @@ export function WatchPage() {
               )}
             </div>
             <p className="stream-note">
-              播放页会提前缓冲一部分内容；实际加载量由浏览器、网络和省流量设置决定。
+              {media.playback_type === "hls"
+                ? "播放器会根据当前网络在 1080p 与 720p 之间自动切换。"
+                : "播放页会提前缓冲一部分内容；实际加载量由浏览器和网络决定。"}
             </p>
           </div>
         </section>

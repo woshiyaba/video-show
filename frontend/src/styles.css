@@ -369,6 +369,34 @@ img {
   font-weight: 700;
 }
 
+.processing-badge {
+  position: absolute;
+  left: 9px;
+  top: 9px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 8px;
+  border-radius: 7px;
+  color: #fff;
+  background: rgba(49, 94, 251, 0.9);
+  backdrop-filter: blur(5px);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.processing-badge svg {
+  animation: spin 900ms linear infinite;
+}
+
+.processing-badge.failed {
+  background: rgba(179, 60, 46, 0.92);
+}
+
+.processing-badge.failed svg {
+  animation: none;
+}
+
 .play-overlay {
   width: 48px;
   height: 48px;
@@ -1176,6 +1204,30 @@ img {
   align-items: flex-start;
   justify-content: center;
   max-width: 680px;
+}
+
+.processing-message {
+  gap: 10px;
+}
+
+.processing-message > h1,
+.processing-message > p {
+  margin: 0;
+}
+
+.processing-message > p {
+  max-width: 580px;
+  color: var(--muted);
+  line-height: 1.7;
+}
+
+.processing-message .processing-note {
+  margin-bottom: 8px;
+  font-size: 13px;
+}
+
+.processing-message.failed > svg {
+  color: #b33c2e;
 }
 
 .narrow-message h1 {

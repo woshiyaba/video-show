@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import StrEnum
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -36,12 +37,16 @@ class MediaCard(BaseModel):
     duration_seconds: float | None
     width: int | None
     height: int | None
+    processing_status: Literal["processing", "ready", "failed"]
+    playback_type: Literal["direct", "hls", "unavailable"]
+    processing_error: str | None
+    playback_size_bytes: int | None
     created_at: datetime
     updated_at: datetime
 
 
 class MediaDetail(MediaCard):
-    content_url: str
+    content_url: str | None
 
 
 class MediaListResponse(BaseModel):
@@ -145,3 +150,5 @@ class HealthResponse(BaseModel):
     cos_configured: bool
     cos: str
     cos_cors: str
+    video_transcoding_enabled: bool
+    video_transcoding: Literal["disabled", "ok", "incomplete"]

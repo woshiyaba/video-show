@@ -8,19 +8,26 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
-from app.api import _cleanup_expired_uploads, router
+from app.api import (
+    _cleanup_expired_uploads,
+    _cleanup_pending_sources,
+    router,
+)
 from app.config import APP_PREFIX, get_settings
 from app.cos_service import get_cos_service
-from app.database import Base, SessionLocal, engine
+from app.database import Base, SessionLocal, engine, ensure_schema
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     Base.metadata.create_all(bind=engine)
+    ensure_schema(engine)
     if settings.cos_is_configured:
         try:
             with SessionLocal() as session:
-                _cleanup_expired_uploads(session, get_cos_service())
+                cos = get_cos_service()
+                _cleanup_expired_uploads(session, cos)
+                _cleanup_pending_sources(session, cos)
         except Exception:
             # A temporary COS outage must not prevent the web application from
             # starting; stale sessions will be retried on the next upload.
