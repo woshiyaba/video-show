@@ -7,7 +7,6 @@ import {
   RotateCw,
 } from "lucide-react";
 import {
-  useCallback,
   useEffect,
   useRef,
   useState,
@@ -19,21 +18,8 @@ import { PageLoader } from "../components/PageLoader";
 import { formatBytes, formatDate } from "../media-utils";
 import type { MediaCardData, MediaDetailData } from "../types";
 
-const TARGET_BUFFER_SECONDS = 6;
-const MIN_RESUME_BUFFER_SECONDS = 2;
-const MAX_BUFFER_HOLD_MS = 5_000;
 const RELATED_FALLBACK_MS = 6_000;
 const PROCESSING_POLL_MS = 5_000;
-
-type PlaybackPhase =
-  | "idle"
-  | "preparing"
-  | "rebuffering"
-  | "playing"
-  | "ready"
-  | "error";
-
-type HoldReason = "initial" | "rebuffering";
 
 interface NetworkInformationLike {
   saveData?: boolean;
@@ -43,37 +29,11 @@ interface NavigatorWithConnection extends Navigator {
   connection?: NetworkInformationLike;
 }
 
-interface PendingRestore {
-  currentTime: number;
-  shouldPlay: boolean;
-}
-
 function prefersDataSaving(): boolean {
   if (typeof navigator === "undefined") return false;
   return Boolean(
     (navigator as NavigatorWithConnection).connection?.saveData,
   );
-}
-
-function getBufferedAhead(video: HTMLVideoElement): number {
-  const currentTime = video.currentTime;
-  for (let index = 0; index < video.buffered.length; index += 1) {
-    const start = video.buffered.start(index);
-    const end = video.buffered.end(index);
-    if (currentTime + 0.15 >= start && currentTime <= end) {
-      return Math.max(0, end - currentTime);
-    }
-  }
-  return 0;
-}
-
-function getRemainingSeconds(video: HTMLVideoElement): number {
-  if (!Number.isFinite(video.duration)) return TARGET_BUFFER_SECONDS;
-  return Math.max(0, video.duration - video.currentTime);
-}
-
-function getTargetBuffer(video: HTMLVideoElement): number {
-  return Math.min(TARGET_BUFFER_SECONDS, getRemainingSeconds(video));
 }
 
 function isAbortError(reason: unknown): boolean {
@@ -91,149 +51,15 @@ export function WatchPage() {
   const [detailError, setDetailError] = useState("");
   const [relatedError, setRelatedError] = useState("");
   const [relatedLoading, setRelatedLoading] = useState(false);
-  const [playbackPhase, setPlaybackPhase] =
-    useState<PlaybackPhase>("idle");
-  const [bufferedAhead, setBufferedAhead] = useState(0);
-  const [playbackError, setPlaybackError] = useState("");
-  const [retrying, setRetrying] = useState(false);
-  const [playerRevision, setPlayerRevision] = useState(0);
   const [conserveData] = useState(prefersDataSaving);
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
-  const playbackTypeRef = useRef(media?.playback_type ?? "direct");
-  playbackTypeRef.current = media?.playback_type ?? "direct";
-  const activeIdRef = useRef(id);
-  activeIdRef.current = id;
-  const holdReasonRef = useRef<HoldReason | null>(null);
-  const holdStartedAtRef = useRef(0);
-  const holdTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const shouldResumeRef = useRef(false);
-  const hasStartedRef = useRef(false);
-  const seekingRef = useRef(false);
-  const resumeAfterSeekRef = useRef(false);
-  const bypassNextPlayRef = useRef(false);
-  const skipHoldUntilPlayingRef = useRef(false);
   const relatedLoaderRef = useRef<(() => void) | null>(null);
-  const pendingRestoreRef = useRef<PendingRestore | null>(null);
-
-  const clearHoldTimer = useCallback(() => {
-    if (holdTimerRef.current !== null) {
-      clearInterval(holdTimerRef.current);
-      holdTimerRef.current = null;
-    }
-  }, []);
-
-  const clearHold = useCallback(() => {
-    clearHoldTimer();
-    holdReasonRef.current = null;
-    holdStartedAtRef.current = 0;
-    shouldResumeRef.current = false;
-  }, [clearHoldTimer]);
-
-  const updateBufferedAhead = useCallback(() => {
-    const video = videoRef.current;
-    if (!video) return 0;
-    const ahead = getBufferedAhead(video);
-    setBufferedAhead(ahead);
-    return ahead;
-  }, []);
-
-  const playWithFallback = useCallback((video: HTMLVideoElement) => {
-    bypassNextPlayRef.current = true;
-    void video.play().catch((reason: unknown) => {
-      bypassNextPlayRef.current = false;
-      if (
-        video.error ||
-        (reason instanceof DOMException && reason.name === "AbortError")
-      ) {
-        return;
-      }
-      setPlaybackPhase("ready");
-    });
-  }, []);
-
-  const evaluateHold = useCallback(() => {
-    const video = videoRef.current;
-    if (!video || holdReasonRef.current === null) return;
-
-    const ahead = getBufferedAhead(video);
-    const remaining = getRemainingSeconds(video);
-    const target = getTargetBuffer(video);
-    const elapsed = Date.now() - holdStartedAtRef.current;
-    const minimumAfterTimeout = Math.min(
-      MIN_RESUME_BUFFER_SECONDS,
-      remaining,
-    );
-    setBufferedAhead(ahead);
-
-    const targetReached = ahead + 0.1 >= target;
-    const timedOutWithMinimum =
-      elapsed >= MAX_BUFFER_HOLD_MS &&
-      ahead + 0.1 >= minimumAfterTimeout;
-    if (!targetReached && !timedOutWithMinimum) return;
-
-    const shouldResume = shouldResumeRef.current;
-    clearHold();
-    if (shouldResume) {
-      playWithFallback(video);
-    } else {
-      setPlaybackPhase("ready");
-    }
-  }, [clearHold, playWithFallback]);
-
-  const beginHold = useCallback(
-    (reason: HoldReason, shouldResume: boolean) => {
-      const video = videoRef.current;
-      if (
-        !video ||
-        seekingRef.current ||
-        playbackTypeRef.current === "hls"
-      ) {
-        return false;
-      }
-
-      const ahead = getBufferedAhead(video);
-      setBufferedAhead(ahead);
-      if (ahead + 0.1 >= getTargetBuffer(video)) return false;
-
-      clearHoldTimer();
-      holdReasonRef.current = reason;
-      holdStartedAtRef.current = Date.now();
-      shouldResumeRef.current = shouldResume;
-      video.pause();
-      setPlaybackPhase(
-        reason === "initial" ? "preparing" : "rebuffering",
-      );
-      holdTimerRef.current = setInterval(evaluateHold, 250);
-      return true;
-    },
-    [clearHoldTimer, evaluateHold],
-  );
-
-  const resumeImmediately = useCallback(() => {
-    const video = videoRef.current;
-    if (!video) return;
-    clearHold();
-    skipHoldUntilPlayingRef.current = true;
-    playWithFallback(video);
-  }, [clearHold, playWithFallback]);
 
   useEffect(() => {
     const controller = new AbortController();
     setMedia(null);
     setDetailError("");
-    setPlaybackError("");
-    setPlaybackPhase("idle");
-    setBufferedAhead(0);
-    setRetrying(false);
-    setPlayerRevision((current) => current + 1);
-    hasStartedRef.current = false;
-    seekingRef.current = false;
-    resumeAfterSeekRef.current = false;
-    bypassNextPlayRef.current = false;
-    skipHoldUntilPlayingRef.current = false;
-    pendingRestoreRef.current = null;
-    clearHold();
 
     getMedia(id, { signal: controller.signal })
       .then((detail) => setMedia(detail))
@@ -245,9 +71,8 @@ export function WatchPage() {
 
     return () => {
       controller.abort();
-      clearHold();
     };
-  }, [clearHold, id]);
+  }, [id]);
 
   useEffect(() => {
     if (
@@ -260,14 +85,11 @@ export function WatchPage() {
     const video = videoRef.current;
     if (!video) return;
 
-    setPlaybackError("");
-    setPlaybackPhase("idle");
     if (media.playback_type === "direct") {
       video.load();
       return;
     }
 
-    clearHold();
     const source = media.content_url;
     if (video.canPlayType("application/vnd.apple.mpegurl")) {
       video.src = source;
@@ -283,8 +105,8 @@ export function WatchPage() {
       .then(({ default: Hls }) => {
         if (cancelled) return;
         if (!Hls.isSupported()) {
-          setPlaybackError("当前浏览器不支持 HLS 自适应视频播放。");
-          setPlaybackPhase("error");
+          video.src = source;
+          video.load();
           return;
         }
 
@@ -297,19 +119,12 @@ export function WatchPage() {
         hls.on(Hls.Events.MEDIA_ATTACHED, () => {
           hls.loadSource(source);
         });
-        hls.on(Hls.Events.ERROR, (_event, data) => {
-          if (!data.fatal || cancelled) return;
-          setPlaybackError(
-            "自适应视频流加载中断，请重新加载后继续观看。",
-          );
-          setPlaybackPhase("error");
-        });
         hls.attachMedia(video);
       })
       .catch(() => {
         if (cancelled) return;
-        setPlaybackError("自适应播放器加载失败，请刷新页面重试。");
-        setPlaybackPhase("error");
+        video.src = source;
+        video.load();
       });
     return () => {
       cancelled = true;
@@ -317,12 +132,7 @@ export function WatchPage() {
       video.removeAttribute("src");
       video.load();
     };
-  }, [
-    clearHold,
-    conserveData,
-    media,
-    playerRevision,
-  ]);
+  }, [conserveData, media]);
 
   useEffect(() => {
     if (media?.processing_status !== "processing") return;
@@ -393,153 +203,8 @@ export function WatchPage() {
     };
   }, [id, media]);
 
-  useEffect(
-    () => () => {
-      clearHold();
-    },
-    [clearHold],
-  );
-
-  const handlePlay = () => {
-    const video = videoRef.current;
-    if (!video) return;
-
-    if (bypassNextPlayRef.current) {
-      bypassNextPlayRef.current = false;
-      hasStartedRef.current = true;
-      setPlaybackPhase("playing");
-      return;
-    }
-    if (holdReasonRef.current !== null) {
-      video.pause();
-      return;
-    }
-
-    if (!hasStartedRef.current) {
-      hasStartedRef.current = true;
-      if (beginHold("initial", true)) return;
-    }
-    setPlaybackPhase("playing");
-  };
-
-  const handleWaiting = () => {
-    const video = videoRef.current;
-    if (!video) return;
-    updateBufferedAhead();
-
-    if (seekingRef.current || skipHoldUntilPlayingRef.current) {
-      setPlaybackPhase("rebuffering");
-      return;
-    }
-    if (hasStartedRef.current && holdReasonRef.current === null) {
-      if (!beginHold("rebuffering", true)) {
-        setPlaybackPhase("rebuffering");
-      }
-    } else {
-      setPlaybackPhase("preparing");
-    }
-  };
-
-  const handleStalled = () => {
-    const video = videoRef.current;
-    if (!video || video.paused) return;
-    handleWaiting();
-  };
-
-  const handlePlaying = () => {
-    clearHold();
-    hasStartedRef.current = true;
-    skipHoldUntilPlayingRef.current = false;
-    setPlaybackError("");
-    setPlaybackPhase("playing");
-    updateBufferedAhead();
-  };
-
   const handleCanPlay = () => {
     relatedLoaderRef.current?.();
-    updateBufferedAhead();
-    if (holdReasonRef.current !== null) evaluateHold();
-  };
-
-  const handleSeeking = () => {
-    const video = videoRef.current;
-    if (!video) return;
-    resumeAfterSeekRef.current =
-      shouldResumeRef.current || (!video.paused && hasStartedRef.current);
-    seekingRef.current = true;
-    clearHold();
-    setPlaybackPhase("rebuffering");
-  };
-
-  const handleSeeked = () => {
-    const video = videoRef.current;
-    if (!video) return;
-    seekingRef.current = false;
-    updateBufferedAhead();
-
-    const pendingRestore = pendingRestoreRef.current;
-    if (pendingRestore) {
-      pendingRestoreRef.current = null;
-      if (pendingRestore.shouldPlay) playWithFallback(video);
-      return;
-    }
-    if (resumeAfterSeekRef.current && video.paused) {
-      resumeAfterSeekRef.current = false;
-      playWithFallback(video);
-    }
-  };
-
-  const handleLoadedMetadata = () => {
-    const video = videoRef.current;
-    if (!video) return;
-    updateBufferedAhead();
-
-    const pendingRestore = pendingRestoreRef.current;
-    if (!pendingRestore) return;
-    const maximum = Number.isFinite(video.duration)
-      ? Math.max(0, video.duration - 0.1)
-      : pendingRestore.currentTime;
-    const nextTime = Math.min(pendingRestore.currentTime, maximum);
-    if (nextTime > 0.05) {
-      video.currentTime = nextTime;
-    } else {
-      pendingRestoreRef.current = null;
-      if (pendingRestore.shouldPlay) playWithFallback(video);
-    }
-  };
-
-  const handleMediaError = () => {
-    relatedLoaderRef.current?.();
-    clearHold();
-    setPlaybackError("视频加载中断，请重新加载后继续观看。");
-    setPlaybackPhase("error");
-  };
-
-  const handleRetry = async () => {
-    const retryId = id;
-    const currentVideo = videoRef.current;
-    const restore: PendingRestore = {
-      currentTime: currentVideo?.currentTime ?? 0,
-      shouldPlay: hasStartedRef.current,
-    };
-    setRetrying(true);
-    setPlaybackError("");
-    try {
-      const freshMedia = await getMedia(retryId, { fresh: true });
-      if (activeIdRef.current !== retryId) return;
-      pendingRestoreRef.current = restore;
-      setMedia(freshMedia);
-      setPlayerRevision((current) => current + 1);
-      setPlaybackPhase("preparing");
-    } catch (reason) {
-      if (activeIdRef.current !== retryId) return;
-      setPlaybackError(
-        errorMessage(reason, "重新获取视频地址失败，请稍后再试。"),
-      );
-      setPlaybackPhase("error");
-    } finally {
-      if (activeIdRef.current === retryId) setRetrying(false);
-    }
   };
 
   if (detailError) {
@@ -557,7 +222,7 @@ export function WatchPage() {
   if (media.processing_status === "processing") {
     return (
       <main className="page-shell narrow-message processing-message">
-        <LoaderCircle className="buffer-spinner" size={32} />
+        <LoaderCircle className="processing-spinner" size={32} />
         <span className="eyebrow">腾讯云数据万象</span>
         <h1>视频正在云端压缩</h1>
         <p>
@@ -601,16 +266,6 @@ export function WatchPage() {
     );
   }
 
-  const showBufferOverlay = playbackPhase === "preparing" ||
-    playbackPhase === "rebuffering" ||
-    playbackPhase === "ready" ||
-    playbackPhase === "error";
-  const bufferLabel = playbackPhase === "ready"
-    ? "缓冲已准备好"
-    : playbackPhase === "rebuffering"
-      ? "网络有些慢，正在多缓冲一点…"
-      : "正在提前缓冲…";
-
   return (
     <main className="watch-shell">
       <Link to="/" className="back-link">
@@ -621,7 +276,6 @@ export function WatchPage() {
         <section>
           <div className="player-frame">
             <video
-              key={`${media.content_url}-${playerRevision}`}
               ref={videoRef}
               src={
                 media.playback_type === "direct"
@@ -633,61 +287,9 @@ export function WatchPage() {
               playsInline
               preload={conserveData ? "metadata" : "auto"}
               onCanPlay={handleCanPlay}
-              onError={handleMediaError}
-              onLoadedMetadata={handleLoadedMetadata}
-              onPlay={handlePlay}
-              onPlaying={handlePlaying}
-              onProgress={() => {
-                updateBufferedAhead();
-                evaluateHold();
-              }}
-              onSeeked={handleSeeked}
-              onSeeking={handleSeeking}
-              onStalled={handleStalled}
-              onTimeUpdate={updateBufferedAhead}
-              onWaiting={handleWaiting}
             >
               当前浏览器无法播放该视频。
             </video>
-            {showBufferOverlay && (
-              <div className="buffer-overlay" role="status" aria-live="polite">
-                <div className="buffer-card">
-                  {playbackPhase === "error" ? (
-                    <RotateCw size={24} />
-                  ) : (
-                    <LoaderCircle className="buffer-spinner" size={26} />
-                  )}
-                  <strong>
-                    {playbackPhase === "error"
-                      ? "播放暂时中断"
-                      : bufferLabel}
-                  </strong>
-                  <span>
-                    {playbackPhase === "error"
-                      ? playbackError
-                      : `已准备 ${Math.floor(bufferedAhead)} 秒`}
-                  </span>
-                  {playbackPhase === "error" ? (
-                    <button
-                      type="button"
-                      className="buffer-action"
-                      onClick={handleRetry}
-                      disabled={retrying}
-                    >
-                      {retrying ? "正在重新加载…" : "重新加载"}
-                    </button>
-                  ) : (
-                    <button
-                      type="button"
-                      className="buffer-action"
-                      onClick={resumeImmediately}
-                    >
-                      立即播放
-                    </button>
-                  )}
-                </div>
-              </div>
-            )}
           </div>
           <div className="watch-info">
             <span className="eyebrow">正在播放</span>
@@ -713,7 +315,7 @@ export function WatchPage() {
             <p className="stream-note">
               {media.playback_type === "hls"
                 ? "播放器会根据当前网络在 1080p 与 720p 之间自动切换。"
-                : "播放页会提前缓冲一部分内容；实际加载量由浏览器和网络决定。"}
+                : "视频由浏览器原生播放器直接加载。"}
             </p>
           </div>
         </section>

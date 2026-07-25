@@ -25,7 +25,6 @@ vi.mock("hls.js", () => {
   class MockHls {
     static Events = {
       MEDIA_ATTACHED: "media-attached",
-      ERROR: "error",
     };
 
     static isSupported() {
@@ -91,24 +90,9 @@ function getVideo(container: HTMLElement): HTMLVideoElement {
   return video;
 }
 
-function bufferedRange(start: number, end: number): TimeRanges {
-  return {
-    length: 1,
-    start: (index: number) => {
-      if (index !== 0) throw new DOMException("IndexSizeError");
-      return start;
-    },
-    end: (index: number) => {
-      if (index !== 0) throw new DOMException("IndexSizeError");
-      return end;
-    },
-  };
-}
-
 describe("WatchPage progressive playback", () => {
   let loadSpy: ReturnType<typeof vi.spyOn>;
   let pauseSpy: ReturnType<typeof vi.spyOn>;
-  let playSpy: ReturnType<typeof vi.spyOn>;
 
   beforeEach(() => {
     getMediaMock.mockReset();
@@ -127,8 +111,7 @@ describe("WatchPage progressive playback", () => {
     pauseSpy = vi
       .spyOn(HTMLMediaElement.prototype, "pause")
       .mockImplementation(() => undefined);
-    playSpy = vi
-      .spyOn(HTMLMediaElement.prototype, "play")
+    vi.spyOn(HTMLMediaElement.prototype, "play")
       .mockResolvedValue(undefined);
   });
 
@@ -230,10 +213,12 @@ describe("WatchPage progressive playback", () => {
     const video = getVideo(container);
     fireEvent.playing(video);
     fireEvent.waiting(video);
+    fireEvent.stalled(video);
     expect(pauseSpy).not.toHaveBeenCalled();
     expect(
-      await screen.findByText("网络有些慢，正在多缓冲一点…"),
-    ).toBeInTheDocument();
+      screen.queryByText("网络有些慢，正在多缓冲一点…"),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
   });
 
   it.each([
@@ -255,37 +240,25 @@ describe("WatchPage progressive playback", () => {
     },
   );
 
-  it("shows buffered seconds on waiting and lets the viewer resume immediately", async () => {
+  it("leaves direct-video buffering and seeking to the native player", async () => {
     getMediaMock.mockResolvedValue(mediaDetail("clip"));
     const { container } = renderWatchPage();
     await screen.findByRole("heading", { name: "视频 clip" });
     const video = getVideo(container);
-    Object.defineProperties(video, {
-      buffered: {
-        configurable: true,
-        value: bufferedRange(0, 3.8),
-      },
-      currentTime: { configurable: true, writable: true, value: 1 },
-      duration: { configurable: true, value: 60 },
-    });
 
+    fireEvent.play(video);
     fireEvent.playing(video);
     fireEvent.waiting(video);
+    fireEvent.stalled(video);
+    fireEvent.seeking(video);
+    fireEvent.seeked(video);
 
+    expect(pauseSpy).not.toHaveBeenCalled();
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+    expect(screen.queryByText(/缓冲/)).not.toBeInTheDocument();
     expect(
-      await screen.findByText("网络有些慢，正在多缓冲一点…"),
-    ).toBeInTheDocument();
-    expect(screen.getByText("已准备 2 秒")).toBeInTheDocument();
-    expect(pauseSpy).toHaveBeenCalled();
-
-    fireEvent.click(screen.getByRole("button", { name: "立即播放" }));
-    expect(playSpy).toHaveBeenCalled();
-    fireEvent.playing(video);
-    await waitFor(() => {
-      expect(
-        screen.queryByText("网络有些慢，正在多缓冲一点…"),
-      ).not.toBeInTheDocument();
-    });
+      screen.queryByRole("button", { name: "立即播放" }),
+    ).not.toBeInTheDocument();
   });
 
   it("aborts the previous detail request and ignores its late result", async () => {
@@ -329,47 +302,21 @@ describe("WatchPage progressive playback", () => {
     expect(screen.queryByText("过期的旧视频")).not.toBeInTheDocument();
   });
 
-  it("refreshes an expired media URL after a playback error", async () => {
-    const refreshed = deferred<MediaDetailData>();
-    getMediaMock
-      .mockResolvedValueOnce(mediaDetail("clip"))
-      .mockReturnValueOnce(refreshed.promise);
+  it("leaves playback errors to the native player without refreshing", async () => {
+    getMediaMock.mockResolvedValue(mediaDetail("clip"));
     const { container } = renderWatchPage();
     await screen.findByRole("heading", { name: "视频 clip" });
     const video = getVideo(container);
-    Object.defineProperty(video, "currentTime", {
-      configurable: true,
-      writable: true,
-      value: 42,
-    });
-    fireEvent.playing(video);
+
     fireEvent.error(video);
 
+    expect(getMediaMock).toHaveBeenCalledTimes(1);
     expect(
-      await screen.findByText("视频加载中断，请重新加载后继续观看。"),
-    ).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "重新加载" }));
-    expect(getMediaMock).toHaveBeenLastCalledWith("clip", { fresh: true });
-
-    refreshed.resolve(
-      mediaDetail("clip", {
-        content_url: "https://media.example/clip-refreshed.mp4",
-      }),
-    );
-    await waitFor(() => {
-      expect(getVideo(container)).toHaveAttribute(
-        "src",
-        "https://media.example/clip-refreshed.mp4",
-      );
-    });
-    const refreshedVideo = getVideo(container);
-    Object.defineProperty(refreshedVideo, "duration", {
-      configurable: true,
-      value: 90,
-    });
-    fireEvent.loadedMetadata(refreshedVideo);
-    expect(refreshedVideo.currentTime).toBe(42);
-    fireEvent.seeked(refreshedVideo);
-    expect(playSpy).toHaveBeenCalled();
+      screen.queryByText("视频加载中断，请重新加载后继续观看。"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "重新加载" }),
+    ).not.toBeInTheDocument();
+    expect(getVideo(container)).toBeInTheDocument();
   });
 });
