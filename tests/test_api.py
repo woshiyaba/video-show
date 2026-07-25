@@ -312,7 +312,13 @@ def test_transcode_callback_promotes_private_hls_and_deletes_source(
     fake_cos.objects.update(
         {
             f"{prefix}master.m3u8": (
-                b"#EXTM3U\n720/index.m3u8\n1080/index.m3u8\n"
+                b"#EXTM3U\n"
+                b"#EXT-X-STREAM-INF:PROGRAM-ID=1,BANDWIDTH=0,"
+                b"RESOLUTION=1280x720\n"
+                b"720/index.m3u8\n"
+                b"#EXT-X-STREAM-INF:PROGRAM-ID=1,BANDWIDTH=0,"
+                b"RESOLUTION=1920x1080\n"
+                b"1080/index.m3u8\n"
             ),
             f"{prefix}720/index.m3u8": b"#EXTM3U\nsegment-0.ts\n",
             f"{prefix}720/segment-0.ts": b"720-segment",
@@ -351,6 +357,17 @@ def test_transcode_callback_promotes_private_hls_and_deletes_source(
     assert playlist.headers["content-type"].startswith(
         "application/vnd.apple.mpegurl"
     )
+    assert "BANDWIDTH=2628000,RESOLUTION=1280x720" in playlist.text
+    assert "BANDWIDTH=5128000,RESOLUTION=1920x1080" in playlist.text
+    assert "BANDWIDTH=0" not in playlist.text
+    playlist_head = client.head(
+        f"/video-show/api/media/{media_id}/stream/master.m3u8"
+    )
+    assert playlist_head.status_code == 200
+    assert playlist_head.content == b""
+    assert playlist_head.headers["content-length"] == str(
+        len(playlist.content)
+    )
     segment = client.get(
         f"/video-show/api/media/{media_id}/stream/720/segment-0.ts",
         follow_redirects=False,
@@ -362,6 +379,40 @@ def test_transcode_callback_promotes_private_hls_and_deletes_source(
         follow_redirects=False,
     )
     assert traversal.status_code == 404
+
+    apple_headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (iPhone; CPU iPhone OS 18_5 like Mac OS X) "
+            "AppleWebKit/605.1.15 Mobile/15E148 Version/18.5 Safari/604.1"
+        )
+    }
+    apple_segment = client.get(
+        f"/video-show/api/media/{media_id}/stream/720/segment-0.ts",
+        headers=apple_headers,
+        follow_redirects=False,
+    )
+    assert apple_segment.status_code == 200
+    assert apple_segment.content == b"720-segment"
+    assert apple_segment.headers["content-type"].startswith("video/mp2t")
+    assert apple_segment.headers["content-disposition"] == "inline"
+
+    apple_range = client.get(
+        f"/video-show/api/media/{media_id}/stream/720/segment-0.ts",
+        headers={**apple_headers, "Range": "bytes=4-10"},
+        follow_redirects=False,
+    )
+    assert apple_range.status_code == 206
+    assert apple_range.content == b"segment"
+    assert apple_range.headers["content-range"] == "bytes 4-10/11"
+
+    apple_head = client.head(
+        f"/video-show/api/media/{media_id}/stream/720/segment-0.ts",
+        headers=apple_headers,
+        follow_redirects=False,
+    )
+    assert apple_head.status_code == 200
+    assert apple_head.content == b""
+    assert apple_head.headers["content-length"] == "11"
 
     deleted = client.delete(f"/video-show/api/media/{media_id}")
     assert deleted.status_code == 204

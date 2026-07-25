@@ -3,12 +3,21 @@ from __future__ import annotations
 import hmac
 import logging
 import math
+import re
 from datetime import UTC, datetime, timedelta
 from pathlib import PurePath, PurePosixPath
 from typing import Any
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+    Query,
+    Request,
+    Response,
+    status,
+)
 from fastapi.responses import RedirectResponse
 from sqlalchemy import func, select
 from sqlalchemy.exc import SQLAlchemyError
@@ -53,6 +62,8 @@ HLS_CONTENT_TYPES = {
     ".ts": "video/mp2t",
 }
 MAX_HLS_ASSETS = 20_000
+HLS_STREAM_INF_PREFIX = "#EXT-X-STREAM-INF:"
+APPLE_HLS_USER_AGENT_MARKERS = ("iphone", "ipad", "ipod")
 
 
 def _cos_or_503() -> CosService:
@@ -125,6 +136,137 @@ def _hls_master_key(media_id: str) -> str:
 
 def _hls_prefix(master_key: str) -> str:
     return master_key.rsplit("/", 1)[0] + "/"
+
+
+def _fallback_hls_bandwidth(attributes: str) -> int:
+    resolution = re.search(
+        r"(?:^|,)RESOLUTION=(\d+)x(\d+)(?:,|$)",
+        attributes,
+        flags=re.IGNORECASE,
+    )
+    if resolution is None:
+        return 2_628_000
+
+    width, height = (int(value) for value in resolution.groups())
+    if width >= 1920 or height >= 1080:
+        return 5_128_000
+    if width >= 1280 or height >= 720:
+        return 2_628_000
+    if width >= 854 or height >= 480:
+        return 1_128_000
+    return 628_000
+
+
+def _normalize_hls_playlist(content: bytes) -> bytes:
+    playlist = content.decode("utf-8-sig", errors="replace")
+    has_trailing_newline = playlist.endswith(("\n", "\r"))
+    normalized_lines: list[str] = []
+
+    for line in playlist.splitlines():
+        stripped = line.lstrip()
+        if not stripped.startswith(HLS_STREAM_INF_PREFIX):
+            normalized_lines.append(line)
+            continue
+
+        indentation = line[: len(line) - len(stripped)]
+        attributes = stripped[len(HLS_STREAM_INF_PREFIX) :]
+        bandwidth = re.search(
+            r"(?:^|,)BANDWIDTH=(\d+)(?=,|$)",
+            attributes,
+            flags=re.IGNORECASE,
+        )
+        if bandwidth is not None and int(bandwidth.group(1)) > 0:
+            normalized_lines.append(line)
+            continue
+
+        fallback = str(_fallback_hls_bandwidth(attributes))
+        if bandwidth is None:
+            separator = "," if attributes else ""
+            attributes = f"{attributes}{separator}BANDWIDTH={fallback}"
+        else:
+            start, end = bandwidth.span(1)
+            attributes = f"{attributes[:start]}{fallback}{attributes[end:]}"
+        normalized_lines.append(
+            f"{indentation}{HLS_STREAM_INF_PREFIX}{attributes}"
+        )
+
+    normalized = "\n".join(normalized_lines)
+    if has_trailing_newline:
+        normalized += "\n"
+    return normalized.encode("utf-8")
+
+
+def _uses_apple_native_hls(user_agent: str) -> bool:
+    normalized = user_agent.lower()
+    if any(marker in normalized for marker in APPLE_HLS_USER_AGENT_MARKERS):
+        return True
+    return (
+        "macintosh" in normalized
+        and "safari/" in normalized
+        and not any(
+            marker in normalized
+            for marker in ("chrome/", "chromium/", "crios/", "edgios/")
+        )
+    )
+
+
+def _hls_bytes_response(
+    content: bytes,
+    request: Request,
+    media_type: str,
+) -> Response:
+    size = len(content)
+    start = 0
+    end = max(size - 1, 0)
+    response_status = status.HTTP_200_OK
+    range_header = request.headers.get("range")
+
+    if range_header:
+        try:
+            unit, raw_range = range_header.split("=", 1)
+            if unit.lower() != "bytes" or "," in raw_range:
+                raise ValueError
+            raw_start, raw_end = raw_range.split("-", 1)
+            if raw_start:
+                start = int(raw_start)
+                end = int(raw_end) if raw_end else size - 1
+                if start < 0 or start >= size or end < start:
+                    raise ValueError
+                end = min(end, size - 1)
+            else:
+                suffix_length = int(raw_end)
+                if suffix_length <= 0:
+                    raise ValueError
+                start = max(size - suffix_length, 0)
+                end = size - 1
+        except (TypeError, ValueError):
+            return Response(
+                status_code=status.HTTP_416_REQUESTED_RANGE_NOT_SATISFIABLE,
+                headers={
+                    "Accept-Ranges": "bytes",
+                    "Content-Range": f"bytes */{size}",
+                    "Cache-Control": "private, no-store",
+                    "Vary": "User-Agent",
+                },
+            )
+        response_status = status.HTTP_206_PARTIAL_CONTENT
+
+    selected = content[start : end + 1] if size else b""
+    headers = {
+        "Accept-Ranges": "bytes",
+        "Cache-Control": "private, no-store",
+        "Content-Disposition": "inline",
+        "Content-Length": str(len(selected)),
+        "Vary": "User-Agent",
+    }
+    if response_status == status.HTTP_206_PARTIAL_CONTENT:
+        headers["Content-Range"] = f"bytes {start}-{end}/{size}"
+    return Response(
+        content=b"" if request.method == "HEAD" else selected,
+        status_code=response_status,
+        media_type=media_type,
+        headers=headers,
+    )
 
 
 def _resolve_hls_reference(
@@ -636,10 +778,14 @@ def get_media(
     return _safe_cos_call("生成媒体播放地址失败", lambda: _detail(media, cos))
 
 
-@router.get("/media/{media_id}/stream/{asset_path:path}")
+@router.api_route(
+    "/media/{media_id}/stream/{asset_path:path}",
+    methods=["GET", "HEAD"],
+)
 def stream_hls_asset(
     media_id: str,
     asset_path: str,
+    request: Request,
     db: Session = Depends(get_db),
 ) -> Response:
     media = _get_media_or_404(db, media_id)
@@ -670,10 +816,30 @@ def stream_hls_asset(
             "读取 HLS 播放列表失败",
             lambda: cos.read_object(object_key),
         )
+        content = _normalize_hls_playlist(content)
+        headers = {
+            "Cache-Control": "private, no-store",
+            "Content-Disposition": "inline",
+        }
+        if request.method == "HEAD":
+            headers["Content-Length"] = str(len(content))
         return Response(
-            content=content,
+            content=b"" if request.method == "HEAD" else content,
             media_type=HLS_CONTENT_TYPES[".m3u8"],
-            headers={"Cache-Control": "private, no-store"},
+            headers=headers,
+        )
+
+    if request.method == "HEAD" or _uses_apple_native_hls(
+        request.headers.get("user-agent", "")
+    ):
+        content = _safe_cos_call(
+            "读取 HLS 分片失败",
+            lambda: cos.read_object(object_key),
+        )
+        return _hls_bytes_response(
+            content,
+            request,
+            HLS_CONTENT_TYPES[path.suffix.lower()],
         )
 
     url = _safe_cos_call(
@@ -683,7 +849,10 @@ def stream_hls_asset(
     return RedirectResponse(
         url=url,
         status_code=status.HTTP_307_TEMPORARY_REDIRECT,
-        headers={"Cache-Control": "private, no-store"},
+        headers={
+            "Cache-Control": "private, no-store",
+            "Vary": "User-Agent",
+        },
     )
 
 
