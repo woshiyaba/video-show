@@ -265,6 +265,10 @@ def test_incomplete_transcoding_config_rejects_video_upload(
 ) -> None:
     client, _, fake_cos = api_client
     fake_cos.settings.video_transcoding_enabled = True
+    fake_cos.settings.cos_workflow_id = "workflow-123"
+    fake_cos.settings.transcode_callback_token = (
+        "replace-with-a-long-random-secret"
+    )
 
     response = client.post(
         "/video-show/api/uploads/initiate",
@@ -362,6 +366,102 @@ def test_transcode_callback_promotes_private_hls_and_deletes_source(
     deleted = client.delete(f"/video-show/api/media/{media_id}")
     assert deleted.status_code == 204
     assert not any(key.startswith(prefix) for key in fake_cos.objects)
+
+
+def test_transcode_callback_accepts_tencent_generated_master_path(
+    api_client,
+) -> None:
+    client, _, fake_cos = api_client
+    fake_cos.settings.video_transcoding_enabled = True
+    fake_cos.settings.cos_workflow_id = "workflow-123"
+    fake_cos.settings.transcode_callback_token = "u" * 40
+    fake_cos.settings.cos_bucket = "media-bucket-1250000000"
+
+    initiated = initiate_video(client)
+    media_id = initiated["session_id"]
+    completed = client.post(
+        f"/video-show/api/uploads/{media_id}/complete",
+        json={"parts": [{"part_number": 1, "etag": '"etag"'}]},
+    )
+    assert completed.status_code == 200
+
+    source_key = fake_cos.completed[0][0]
+    source_path = Path(source_key)
+    source_prefix = source_key.rsplit("/", 1)[0] + "/"
+    run_id = "i1234567890"
+    generated_master = (
+        f"{source_prefix}{source_path.stem}_{run_id}.m3u8"
+    )
+    generated_variant = (
+        f"{source_prefix}media/hls/{media_id}.m3u8"
+    )
+    generated_segment = (
+        f"{source_prefix}media/hls/{media_id}-00000.ts"
+    )
+    unrelated = f"{source_prefix}unrelated-video.mp4"
+    fake_cos.objects.update(
+        {
+            generated_master: (
+                "#EXTM3U\n"
+                "#EXT-X-STREAM-INF:BANDWIDTH=2500000\n"
+                f"media/hls/{media_id}.m3u8\n"
+            ).encode(),
+            generated_variant: (
+                "#EXTM3U\n"
+                "#EXTINF:4,\n"
+                f"{media_id}-00000.ts\n"
+                "#EXT-X-ENDLIST\n"
+            ).encode(),
+            generated_segment: b"segment",
+            unrelated: b"must-not-be-deleted",
+        }
+    )
+
+    callback = client.post(
+        f"/video-show/api/transcode/callback/{'u' * 40}",
+        json={
+            "EventName": "WorkflowFinish",
+            "WorkflowExecution": {
+                "RunId": run_id,
+                "WorkflowId": "workflow-123",
+                "BucketId": "media-bucket-1250000000",
+                "Object": source_key,
+                "State": "Success",
+            },
+        },
+    )
+    assert callback.status_code == 200, callback.text
+    assert source_key not in fake_cos.objects
+    assert unrelated in fake_cos.objects
+
+    detail = client.get(f"/video-show/api/media/{media_id}")
+    assert detail.status_code == 200
+    assert detail.json()["processing_status"] == "ready"
+    assert detail.json()["playback_type"] == "hls"
+
+    master = client.get(
+        f"/video-show/api/media/{media_id}/stream/master.m3u8"
+    )
+    assert master.status_code == 200
+    assert f"media/hls/{media_id}.m3u8" in master.text
+    variant = client.get(
+        f"/video-show/api/media/{media_id}/stream/"
+        f"media/hls/{media_id}.m3u8"
+    )
+    assert variant.status_code == 200
+    segment = client.get(
+        f"/video-show/api/media/{media_id}/stream/"
+        f"media/hls/{media_id}-00000.ts",
+        follow_redirects=False,
+    )
+    assert segment.status_code == 307
+
+    deleted = client.delete(f"/video-show/api/media/{media_id}")
+    assert deleted.status_code == 204
+    assert generated_master not in fake_cos.objects
+    assert generated_variant not in fake_cos.objects
+    assert generated_segment not in fake_cos.objects
+    assert unrelated in fake_cos.objects
 
 
 def test_failed_transcode_keeps_source_and_rejects_bad_callback(

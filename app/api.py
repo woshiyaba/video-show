@@ -52,6 +52,7 @@ HLS_CONTENT_TYPES = {
     ".m3u8": "application/vnd.apple.mpegurl",
     ".ts": "video/mp2t",
 }
+MAX_HLS_ASSETS = 20_000
 
 
 def _cos_or_503() -> CosService:
@@ -126,12 +127,171 @@ def _hls_prefix(master_key: str) -> str:
     return master_key.rsplit("/", 1)[0] + "/"
 
 
-def _valid_hls_output(
+def _resolve_hls_reference(
+    playlist_key: str,
+    reference: str,
+    root_prefix: str,
+) -> str | None:
+    reference_path = reference.split("?", 1)[0].split("#", 1)[0].strip()
+    path = PurePosixPath(reference_path)
+    if (
+        not reference_path
+        or reference_path.startswith("/")
+        or "\\" in reference_path
+        or "://" in reference_path
+        or ".." in path.parts
+    ):
+        return None
+
+    object_key = (PurePosixPath(playlist_key).parent / path).as_posix()
+    if not object_key.startswith(root_prefix):
+        return None
+    return object_key
+
+
+def _inspect_hls_output(
+    cos: CosService,
     master_key: str,
-    objects: list[tuple[str, int]],
-) -> bool:
-    keys = {key for key, _ in objects}
-    return master_key in keys and any(key.endswith(".ts") for key in keys)
+) -> tuple[set[str], int] | None:
+    root_prefix = _hls_prefix(master_key)
+    object_sizes = dict(cos.list_objects(root_prefix))
+    if master_key not in object_sizes:
+        return None
+
+    assets: set[str] = set()
+    pending_playlists = [master_key]
+    visited_playlists: set[str] = set()
+    has_child_playlist = False
+    has_segment = False
+
+    while pending_playlists:
+        playlist_key = pending_playlists.pop()
+        if playlist_key in visited_playlists:
+            continue
+        if len(assets) >= MAX_HLS_ASSETS:
+            return None
+
+        visited_playlists.add(playlist_key)
+        assets.add(playlist_key)
+        try:
+            playlist = cos.read_object(playlist_key).decode(
+                "utf-8-sig",
+                errors="replace",
+            )
+        except Exception:
+            return None
+        if "#EXTM3U" not in playlist:
+            return None
+
+        for raw_line in playlist.splitlines():
+            reference = raw_line.strip()
+            if not reference or reference.startswith("#"):
+                continue
+            object_key = _resolve_hls_reference(
+                playlist_key,
+                reference,
+                root_prefix,
+            )
+            if object_key is None or object_key not in object_sizes:
+                return None
+
+            suffix = PurePosixPath(object_key).suffix.lower()
+            assets.add(object_key)
+            if suffix == ".m3u8":
+                has_child_playlist = True
+                pending_playlists.append(object_key)
+            elif suffix == ".ts":
+                has_segment = True
+            else:
+                return None
+
+    if not has_child_playlist or not has_segment:
+        return None
+    return assets, sum(object_sizes[key] for key in assets)
+
+
+def _hls_master_candidates(
+    cos: CosService,
+    record_id: str,
+    source_key: str,
+    *,
+    preferred_key: str | None = None,
+    run_id: str | None = None,
+) -> list[str]:
+    candidates: list[str] = []
+
+    def add(candidate: str | None) -> None:
+        if candidate and candidate not in candidates:
+            candidates.append(candidate)
+
+    add(preferred_key)
+    add(_hls_master_key(record_id))
+
+    source_path = PurePosixPath(source_key)
+    source_parent = source_path.parent.as_posix()
+    source_prefix = (
+        f"{source_parent}/" if source_parent not in {"", "."} else ""
+    )
+    if run_id:
+        add(f"{source_prefix}{source_path.stem}_{run_id}.m3u8")
+
+    generated_prefix = f"{source_prefix}{source_path.stem}_"
+    for key, _ in cos.list_objects(generated_prefix):
+        if key.lower().endswith(".m3u8"):
+            add(key)
+    return candidates
+
+
+def _locate_hls_output(
+    cos: CosService,
+    record_id: str,
+    source_key: str,
+    *,
+    preferred_key: str | None = None,
+    run_id: str | None = None,
+) -> tuple[str, set[str], int] | None:
+    for master_key in _hls_master_candidates(
+        cos,
+        record_id,
+        source_key,
+        preferred_key=preferred_key,
+        run_id=run_id,
+    ):
+        inspected = _inspect_hls_output(cos, master_key)
+        if inspected is not None:
+            assets, playback_size = inspected
+            return master_key, assets, playback_size
+    return None
+
+
+def _delete_hls_assets(cos: CosService, assets: set[str]) -> None:
+    keys = sorted(assets)
+    for offset in range(0, len(keys), 1000):
+        cos.delete_objects(keys[offset : offset + 1000])
+
+
+def _delete_hls_output(
+    cos: CosService,
+    master_key: str,
+    media_id: str,
+) -> None:
+    inspected = _inspect_hls_output(cos, master_key)
+    if inspected is not None:
+        assets, _ = inspected
+        _delete_hls_assets(cos, assets)
+        return
+
+    # If a playlist is already missing, only remove HLS objects that contain
+    # this media UUID. Never delete the whole parent prefix: Tencent may place
+    # its generated master playlist next to unrelated source videos.
+    assets = {
+        key
+        for key, _ in cos.list_objects(_hls_prefix(master_key))
+        if media_id in key
+        and PurePosixPath(key).suffix.lower() in HLS_CONTENT_TYPES
+    }
+    if assets:
+        _delete_hls_assets(cos, assets)
 
 
 def _apply_processing_result(
@@ -175,13 +335,28 @@ def _promote_hls_output(
     cos: CosService,
     source_key: str,
     targets: list[Media | UploadSession],
-    master_key: str,
+    record_id: str,
+    *,
+    preferred_key: str | None = None,
+    run_id: str | None = None,
 ) -> bool:
-    objects = cos.list_objects(_hls_prefix(master_key))
-    if not _valid_hls_output(master_key, objects):
+    located = _locate_hls_output(
+        cos,
+        record_id,
+        source_key,
+        preferred_key=preferred_key,
+        run_id=run_id,
+    )
+    if located is None:
         return False
 
-    playback_size = sum(size for _, size in objects)
+    master_key, _, playback_size = located
+    if preferred_key and master_key != preferred_key:
+        logger.info(
+            "Using Tencent-generated HLS master for media %s: %s",
+            record_id,
+            master_key,
+        )
     for target in targets:
         target.hls_master_key = master_key
         _apply_processing_result(
@@ -204,8 +379,6 @@ def _reconcile_media(
     if media.processing_status != "processing" or not media.hls_master_key:
         return
     try:
-        if not cos.object_exists(media.hls_master_key):
-            return
         upload = db.get(UploadSession, media.id)
         targets: list[Media | UploadSession] = [media]
         if upload is not None:
@@ -215,7 +388,8 @@ def _reconcile_media(
             cos,
             media.object_key,
             targets,
-            media.hls_master_key,
+            media.id,
+            preferred_key=media.hls_master_key,
         )
     except Exception:
         logger.warning(
@@ -346,14 +520,27 @@ def transcode_callback(
         raise HTTPException(status_code=404, detail="上传记录不存在")
 
     record_id = media.id if media is not None else upload.id
-    master_key = _hls_master_key(record_id)
+    expected_master_key = _hls_master_key(record_id)
+    run_id = str(execution.get("RunId", "")) or None
     cos = _cos_or_503()
 
     if upload is not None and upload.status in {"deleting", "deleted"}:
-        _safe_cos_call(
-            "清理已删除媒体的转码输出失败",
-            lambda: cos.delete_prefix(_hls_prefix(master_key)),
+        located = _safe_cos_call(
+            "查找已删除媒体的转码输出失败",
+            lambda: _locate_hls_output(
+                cos,
+                record_id,
+                source_key,
+                preferred_key=expected_master_key,
+                run_id=run_id,
+            ),
         )
+        if located is not None:
+            master_key, _, _ = located
+            _safe_cos_call(
+                "清理已删除媒体的转码输出失败",
+                lambda: _delete_hls_output(cos, master_key, record_id),
+            )
         return {"ok": True}
 
     targets: list[Media | UploadSession] = []
@@ -374,11 +561,6 @@ def transcode_callback(
         db.commit()
         return {"ok": True}
 
-    if not _safe_cos_call(
-        "检查 HLS 主播放列表失败",
-        lambda: cos.object_exists(master_key),
-    ):
-        raise HTTPException(status_code=409, detail="HLS 输出尚未就绪")
     promoted = _safe_cos_call(
         "验证 HLS 转码输出失败",
         lambda: _promote_hls_output(
@@ -386,10 +568,20 @@ def transcode_callback(
             cos,
             source_key,
             targets,
-            master_key,
+            record_id,
+            preferred_key=expected_master_key,
+            run_id=run_id,
         ),
     )
     if not promoted:
+        logger.warning(
+            "HLS output is incomplete or cannot be located for media %s "
+            "(source=%s, run_id=%s, expected=%s)",
+            record_id,
+            source_key,
+            run_id,
+            expected_master_key,
+        )
         raise HTTPException(status_code=409, detail="HLS 输出不完整")
     return {"ok": True}
 
@@ -465,7 +657,13 @@ def stream_hls_asset(
         raise HTTPException(status_code=404, detail="播放资源不存在")
 
     prefix = _hls_prefix(media.hls_master_key)
-    object_key = prefix + path.as_posix()
+    object_key = (
+        media.hls_master_key
+        if path.as_posix() == "master.m3u8"
+        else prefix + path.as_posix()
+    )
+    if media.id not in object_key:
+        raise HTTPException(status_code=404, detail="播放资源不存在")
     cos = _cos_or_503()
     if path.suffix.lower() == ".m3u8":
         content = _safe_cos_call(
@@ -525,8 +723,10 @@ def delete_media(media_id: str, db: Session = Depends(get_db)) -> Response:
         if media.hls_master_key:
             _safe_cos_call(
                 "删除 HLS 播放文件失败，请稍后重试",
-                lambda: cos.delete_prefix(
-                    _hls_prefix(media.hls_master_key)
+                lambda: _delete_hls_output(
+                    cos,
+                    media.hls_master_key,
+                    media.id,
                 ),
             )
     except HTTPException:

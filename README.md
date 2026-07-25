@@ -76,15 +76,25 @@ COS_BUCKET=example-1250000000
    - 输入格式：音视频文件
    - 处理节点：上一步的 HLS 自适应码流模板
    - 输出 Bucket：当前 Bucket
-   - 输出路径：`/media/hls/${InputName}/`
-   - 主播放列表文件名：`master.${Ext}`
+   - 在“打包配置”中将主播放列表存放路径设为
+     `media/hls/${InputName}/master`；如果控制台要求填写完整文件名，则填写
+     `media/hls/${InputName}/master.m3u8`
+   - 1080p 视频子流的资源存放路径：
+     `media/hls/${InputName}/1080p`
+   - 720p 视频子流的资源存放路径：
+     `media/hls/${InputName}/720p`
+   - 不要在上述输出路径前添加 `${InputPath}`，否则文件会被放到源视频的
+     年/月目录下面
+   - 在“修改打包配置”中设置子流带宽（单位为 b/s）：1080p 为
+     `5128000`，720p 为 `2628000`；不要保留默认值 `0`
    - 回调格式：JSON
    - 回调事件：`WorkflowFinish`
    - 回调地址：
      `https://wikiroco.com/video-show/api/transcode/callback/<随机令牌>`
 
-   输出路径和文件名必须保持一致；应用会验证
-   `media/hls/<媒体ID>/master.m3u8` 及其 TS 分片后才切换播放地址。
+   建议使用上述独立目录，便于管理和删除。后端也兼容腾讯云控制台默认生成的
+   `${InputPath}${InputName}_${RunId}.m3u8` 主播放列表，但不要让不同视频
+   共用相同的子流文件名。
 4. 从工作流详情复制工作流 ID，生成至少 32 个不可预测字符的回调令牌，
    写入服务器 `.env`：
 

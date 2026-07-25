@@ -7,6 +7,9 @@ from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 APP_PREFIX = "/video-show"
+INVALID_CALLBACK_TOKENS = {
+    "replace-with-a-long-random-secret",
+}
 
 
 class Settings(BaseSettings):
@@ -75,6 +78,7 @@ class Settings(BaseSettings):
             self.video_transcoding_enabled
             and self.cos_workflow_id
             and len(self.transcode_callback_token) >= 32
+            and self.transcode_callback_token not in INVALID_CALLBACK_TOKENS
         )
 
 
